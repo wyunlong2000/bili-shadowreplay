@@ -4,14 +4,14 @@
 | --- | --- |
 | 文档编号 | `DDES-001` |
 | 编制日期 | `2026-10-14` |
-| 版本 | `0.1` |
+| 版本 | `0.2` |
 | 状态 | 待评审 |
-| 依据方案 | `DY-AUTO-001` v0.6、`FDES-001` v0.3 |
+| 依据方案 | `DY-AUTO-001` v0.7、`FDES-001` v0.3 |
 | 实现范围 | 后台（Rust）、桌面端（Tauri + Svelte）、Web 端（headless + 同构 Svelte） |
 
 ## 1. 文档说明与范围
 
-本文是 `DY-AUTO-001` v0.6 的开发详设，覆盖三端实现：
+本文是 `DY-AUTO-001` 的开发详设，覆盖三端实现：
 
 - **后台（Rust）**：监测层（`src-tauri/crates/recorder`）、录制管理器（`src-tauri/src/recorder_manager.rs`）、自动化模块（新增 `src-tauri/src/automation/`）、数据库、Webhook。
 - **桌面端（Tauri + Svelte）**：Room / Setting / Task 页面改动，走 Tauri command 与 Tauri event。
@@ -49,7 +49,7 @@ flowchart LR
 | 监测 | `crates/recorder/src/platforms/douyin/api.rs` | 改：`check_user_live`、ttwid 会话 |
 | 监测 | `crates/recorder/src/errors.rs` | 改：错误分类变体 |
 | 添加 | `src-tauri/src/handlers/recorder.rs` | 改：主页链接/短链/sec_uid 归一分支 |
-| 添加 | `src-tauri/src/database/recorder.rs` | 改：`web_rid` 列读写 |
+| 添加 | `src-tauri/src/database/recorder.rs` | 改：`web_rid` 列读写、`detection_states` 持久化 |
 | 分析 | `src-tauri/src/automation/`（mod、scheduler、window、signals、scoring、store） | 新增 |
 | 分析 | `src-tauri/src/database/automation.rs` | 新增：两张表 CRUD |
 | 分析 | `src-tauri/src/handlers/automation.rs` | 新增：候选查询/重试/配置命令 |
@@ -57,7 +57,7 @@ flowchart LR
 | 分析 | `src-tauri/src/ffmpeg/subtitle.rs` | 改：接受外部生成器实例 |
 | 分析 | `src-tauri/src/handlers/video_editing.rs` | 改：密度分析抽公共函数 |
 | 切片 | `src-tauri/src/recorder_manager.rs` | 改：`handle_live_end` 入队候选切片、`clip_range` 复用 |
-| 通知 | `src-tauri/src/webhook/events.rs` | 改：`CandidateClipPayload` |
+| 通知 | `src-tauri/src/webhook/events.rs` | 改：`ClipPayload`（显式判别字段） |
 | 配置 | `src-tauri/src/config.rs`、`handlers/config.rs` | 改：两个配置段与更新命令 |
 | 启动 | `src-tauri/src/main.rs` | 改：迁移 18/19、恢复调用、命令注册 |
 | Web | `src-tauri/src/http_server/api_server.rs` | 改：新路由 |
@@ -69,7 +69,7 @@ flowchart LR
 
 ### 3.1 新增迁移（`main.rs` `get_migrations()`，当前最大版本 17）
 
-版本 18：自动化两张表。
+版本 18：自动化与检测状态三张表。
 
 ```sql
 CREATE TABLE automation_analysis (
@@ -109,6 +109,18 @@ CREATE TABLE automation_candidates (
     UNIQUE (platform, room_id, parent_id, start_ms, end_ms)
 );
 CREATE INDEX idx_candidates_parent ON automation_candidates (room_id, parent_id);
+CREATE TABLE detection_states (
+    platform TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    confirmed INTEGER,                 -- NULL=未确认 / 0=未开播 / 1=开播中
+    last_checked_at INTEGER NOT NULL DEFAULT 0,
+    last_success_at INTEGER NOT NULL DEFAULT 0,
+    error_kind TEXT NOT NULL DEFAULT '',
+    consecutive_unknown INTEGER NOT NULL DEFAULT 0,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (platform, room_id)
+);
 ```
 
 版本 19：录制器表扩展。
@@ -126,7 +138,7 @@ ALTER TABLE recorders ADD COLUMN web_rid TEXT;
 - `automation_analysis` 中 `status='running'` 的行改为 `interrupted`（保留 `processed_until_ms`，可续跑）；
 - `automation_candidates` 中 `status='clipping'` 的行回退为 `ready`（切片任务未完成，可重试）。
 
-`finish_pending_automation` 实现于 `database/automation.rs`，模式对齐 `finish_pending_record_summaries`。
+`finish_pending_automation` 实现于 `database/automation.rs`，模式对齐 `finish_pending_record_summaries`。检测状态由 `RecorderManager` 创建录制器时从 `detection_states` 读取注入（§4.1），不在启动恢复路径处理。
 
 ## 4. 监测层详细设计（`REQ-002`–`REQ-007`、`REQ-014`、`REQ-015`）
 
@@ -153,9 +165,15 @@ pub struct DetectionState {
 - `Err`：分类 `error_kind`，`consecutive_unknown += 1`，推进 `backoff_level`；保留 `confirmed`，不发任何事件（`REQ-002` UNKNOWN 语义）。原有 `is_throttled` 短路行为保留（其他平台不变）；抖音不覆写 `is_throttled`，走"保留状态 + 退避"路径。
 - 熔断（`RVW-005`，默认 10 次）：`consecutive_unknown >= circuit_threshold` 时置 `next_retry_at` 为远期并只发一次桌面通知；用户重新启用或任一成功探测后复位。
 
+**持久化与重启语义**（`DATA-004`）：
+
+- `DetectionState` 变更时防抖写入 `detection_states`（状态转换立即写；计数类变更最多每 30 秒写一次）；
+- `RecorderManager` 创建录制器时读取注入；重启后全部字段恢复并按 `next_retry_at` 继续，退避与熔断不被重启绕过；`confirmed` 与 `error_kind` 保留供前端展示；
+- 用户重新启用（`set_enable`）强制复位 `consecutive_unknown`、`backoff_level`、`next_retry_at`。
+
 退避延迟：`run_recording_loop` 的 `status_poll_delay(interval)` 改为 `recorder.current_poll_delay()`：
 
-- 序列 `[10, 30, 60, 120, 240, 300]` 秒（启动短序列 → 加倍 → 上限 `backoff_cap_seconds`），附加随机抖动；
+- 序列 `[10, 30, 60, 120, 240, 300]` 秒（启动短序列 → 加倍 → 上限），附加随机抖动；上限取 `max(基础间隔, backoff_cap_seconds)`，且不低于基础间隔；
 - `backoff_level == 0` 时使用基础间隔（抖音下限 `max(interval, min_interval_seconds)`，`REQ-004`）。
 
 ### 4.2 错误分类
@@ -217,6 +235,12 @@ ttwid 会话（`REQ-015`）：
   - `Offline` → `RoomPoll { live: false, .. }`（元数据用昵称等）；
   - `Unknown` → 返回分类后的 `RecorderError`（走 4.1 的 UNKNOWN 路径）。
 
+**web_rid 校验与刷新**：
+
+- 每个新场次开始前做一次用户级校验；与缓存 web_rid 不一致时刷新落库并切换；
+- 房间级路径连续失败或空响应达到 3 次 → 回退用户级重新解析；解析成功刷新 web_rid 并恢复房间级；失败按 Unknown 进入退避；
+- 刷新与回退记录日志，便于诊断。
+
 交接后（web_rid 落库）：下次启动直接走房间级路径；用户级接口仅在"首次开播前"使用（`REQ-014`）。
 
 ### 4.5 RecorderInfo 扩展与可观测（`REQ-007`）
@@ -235,6 +259,13 @@ ttwid 会话（`REQ-015`）：
 | 形如 `MS4wLjAB...` 的手动 sec_uid | sec_uid，房间号待解析 | 长度/字符集校验 |
 
 落库：`room_id` 列 = sec_uid（主页模式）或 web_rid（房间号模式）；`extra` = sec_uid；`web_rid` 列 = 已解析值或 NULL。主页模式先调 IES 接口校验并取昵称（§4.3），失败即返回错误不落库。录制器管理器以 `platform:room_id` 为键，两种模式自然并存。
+
+### 5.1 标识语义与消费点审计
+
+- **语义**：`room_id` 为录制器稳定标识（主页模式 = sec_uid；房间号模式 = web_rid）；sec_uid 存 `extra`；`web_rid` 独立列（房间号模式为 NULL）。
+- **规则**：房间级抖音接口调用一律使用"有效 web_rid"（`web_rid` 列，或房间号模式下的 `room_id`）；对外展示与跳转（直播间链接、分享、深链）必须使用 web_rid，未解析时隐藏链接。
+- **消费点审计清单**（实现时逐项核对）：缓存路径 `cache/{platform}/{room_id}/…`（两模式各自一致）；`records`/`videos` 的 room_id 列（跟随录制器标识）；管理器实例键 `platform:room_id`；前端直播间链接（`Room.svelte` 现用 `room_info.room_id` 拼 `live.douyin.com`，需改为 web_rid）；归档查询与删除；MCP/HTTP 参数；`bsr://` 深链。
+- **历史数据**：房间号模式的数据形态不变，无迁移。
 
 ## 6. 分析引擎详细设计（`MOD-002`、`REQ-008`、`REQ-009`）
 
@@ -260,11 +291,13 @@ src-tauri/src/automation/
 - **直播结束**：`RecorderEvent::LiveEnd` → `finalize_live`：处理完所有段落 → analysis status=success、stage=completed；候选置 `ready`；task finish(true)。
 - **异常**：单窗口失败记 `error_message` 并继续；连续失败 3 次暂停本场分析（status=failed），不阻断录制。
 
+分析行按录制段创建（`RecordStart` 即新段）是设计使然：每段独立时间轴与进度；`LiveEnd` 时按 `parent_id` 汇总该场全部分析行统一收尾（§6.3）。
+
 ### 6.3 窗口映射规则（`FLOW-003`）
 
-- 时间轴：窗口以直播起点为 0；segment 前缀边界 = `records.length - safety_margin`（默认 15 秒），同时排除 playlist 正在写入的最后一个 segment；
+- **时间轴**：段内相对时间（以该段第一个 segment 的 `X-PROGRAM-DATE-TIME` 为 0），与弹幕归一化（`first_segment_timestamp`）及 `clip_range` 的范围语义一致；候选归属单个 segment、跨段不合并；segment 前缀边界 = `records.length - safety_margin`（默认 15 秒），同时排除正在写入的最后一个 segment；
 - 窗口大小 `window_seconds`（默认 300）；只处理 `processed_until_ms` 之后、`end ≤ 可处理边界` 的完整窗口；
-- 数据来源：`cache/{platform}/{room_id}/{live_id}/` 的 `playlist.m3u8`（片段范围）与 `events.jsonl`（弹幕）；弹幕绝对时间用 `first_segment_timestamp` 归一为直播相对时间（复用 `load_archive_danmus` 的归一逻辑）。
+- 数据来源：`cache/{platform}/{room_id}/{live_id}/` 的 `playlist.m3u8`（片段范围）与 `events.jsonl`（弹幕）；弹幕绝对时间用 `first_segment_timestamp` 归一为段内相对时间（复用 `load_archive_danmus` 的归一逻辑）。
 
 ### 6.4 信号采集
 
@@ -288,14 +321,14 @@ src-tauri/src/automation/
 
 ### 6.6 候选登记与状态机（`DATA-001`、`DATA-002`）
 
-- 相邻窗口合并：连续达标窗口合并为候选区间（间隔 ≤ 1 个窗口合并），前后各补 `padding_seconds`（默认 30 秒，不越界）；
+- 相邻窗口合并（仅限同段内，间隔 ≤ 1 个窗口合并），前后各补 `padding_seconds`（默认 30 秒，不越界）；跨段不合并（§6.3）；
 - 唯一键 `(platform, room_id, parent_id, start_ms, end_ms)` 冲突时不重复插入（upsert 分数与信号）；
 - 候选状态机：
 
 ```mermaid
 stateDiagram-v2
     [*] --> ready
-    ready --> clipping: 入队切片任务
+    ready --> clipping: 原子认领成功
     clipping --> clipped: 切片成功
     clipping --> failed: 切片失败
     failed --> ready: 手动重试
@@ -311,11 +344,19 @@ stateDiagram-v2
   - 调用 `RecorderManager::clip_range`，参数 `ClipRangeParams { platform, room_id, live_id: candidate.live_id, ranges: vec![Range { start: start_ms / 1000.0, end: end_ms / 1000.0 }], danmu: true, fix_encoding: true, local_offset: 0, transition: None, title, note: reason, cover: "" }`；
   - 封面、video 行、auto_subtitle 沿用 `clip_range_inner` 的后处理流程（抽公共函数复用）；
   - 成功：写回 `video_id`、status=`clipped`、notify_status 待发；失败：status=`failed` + error_message。
-- 幂等：入队与执行前均检查 `status='ready' AND video_id IS NULL`。
+- **原子认领**：入队前查询 `ready` 候选；执行前先认领：
+
+```sql
+UPDATE automation_candidates
+SET status = 'clipping', updated_at = ?
+WHERE id = ? AND status = 'ready';
+```
+
+仅当 `rows_affected == 1` 才执行切片；认领失败即跳过（已被其他任务认领或状态已变化）。
 
 ### 7.2 Webhook 契约（`REQ-011`、`DATA-002`）
 
-`webhook/events.rs` 新增：
+`webhook/events.rs` 新增与调整：
 
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -329,14 +370,16 @@ pub struct CandidateClipInfo {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct CandidateClipPayload {
+pub struct ClipPayload {
     #[serde(flatten)]
     pub video: VideoRow,
-    pub candidate: CandidateClipInfo,
+    pub kind: String,                                  // "clip" | "candidate"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateClipInfo>,
 }
 ```
 
-`Payload` 增加变体 `CandidateClip(CandidateClipPayload)`（untagged，与现有 `Clip(VideoRow)` 兼容共存）。候选切片发 `clip.generated` 事件，payload 为 `CandidateClipPayload`：现有订阅者读 video 字段不变，邮件服务读 `candidate.id` 去重。传输重试沿用 `WebhookPoster`（3 次）；poster 成功 → `notify_status='sent'`，重试耗尽 → `'failed'`（不阻断）。
+`Payload::Clip(VideoRow)` 改为 `Payload::Clip(ClipPayload)`：单一变体加显式判别字段，不再依赖 `untagged` 声明顺序。普通切片（整场/手动）`kind="clip"`；候选切片 `kind="candidate"` 且携带 `candidate` 对象；事件类型仍为 `clip.generated`。调用点同步更新：`handlers/video.rs`（`clip_range` 任务）与 `recorder_manager.rs`（整场切片）填 `kind="clip"`，候选切片路径填 `kind="candidate"`。兼容性：现有订阅者按需忽略新增字段；补双向序列化测试（§13）。传输重试沿用 `WebhookPoster`（3 次）；poster 成功 → `notify_status='sent'`，重试耗尽 → `'failed'`（不阻断）。
 
 ### 7.3 参考邮件接收器（`PH-003` 验收物）
 
@@ -370,7 +413,7 @@ session_refresh_cooldown_seconds = 60
 
 - `handlers/config.rs` 新增 `update_automation_config`、`update_douyin_monitor_config`（模式同 `update_auto_generate`：写回 Conf.toml + 更新内存 + 通知前端）；
 - HTTP 路由与 MCP 同步暴露（§9）；
-- 抖音轮询下限：`DouyinRecorder` 实际基础间隔 = `max(config.status_check_interval, douyin_monitor.min_interval_seconds)`（`REQ-004`）。
+- **参数语义（`RVW-001`/`RVW-002`/`RVW-005` 收敛值）**：`min_interval_seconds` 为基础间隔下限；退避自基础间隔起步、不低于基础间隔，上限取 `max(基础间隔, backoff_cap_seconds)`；`Retry-After` 与本地退避取较大者；熔断恢复为用户重新启用或冷却到期后的首次成功探测。
 
 ## 9. 接口设计
 
@@ -435,6 +478,7 @@ case "douyin": {
 
 - 检测状态徽标：`detection_status`（在播/未播/未知/未确认）+ 错误类别悬浮提示（限流/账号失效/验证/网络）+ 下次重试时间；
 - 房间号解析状态：`room_resolved=false` 时显示"房间号待解析（首次开播自动获取）"；
+- 直播间链接使用 web_rid（未解析时隐藏，§5.1）；
 - 新增"候选切片"入口：展开 `CandidatePanel`。
 
 **`CandidatePanel.svelte`（新组件）**：候选列表（时间范围、评分、推荐理由、状态、切片链接）；操作"重试"（`retry_candidate`）；数据 `get_candidates` + 订阅 `candidates-changed` 刷新。
@@ -474,9 +518,9 @@ sequenceDiagram
     H->>H: 落库 web_rid，发 LiveStart，启动录制
 ```
 
-**录制中分析循环**：RecordStart → spawn 分析任务 → 每 tick 取已录时长 → 处理完整窗口（弹幕/字幕/评分）→ 写候选与进度 → RecordEnd 收尾段落 → LiveEnd 收尾全场上限。
+**录制中分析循环**：RecordStart → spawn 分析任务 → 每 tick 取已录时长 → 处理完整窗口（弹幕/字幕/评分）→ 写候选与进度 → RecordEnd 收尾段落 → LiveEnd 收尾全场（按 `parent_id` 汇总）。
 
-**直播结束 → 通知**：LiveEnd → handle_live_end（整场切片 + 候选切片入队）→ 逐个切片（clip_range + 弹幕烧录）→ 回写 video_id → 发 `clip.generated`（含 candidate 对象）→ 外部邮件服务按 `candidate.id` 去重发送 → 更新 notify_status。
+**直播结束 → 通知**：LiveEnd → handle_live_end（整场切片 + 候选切片入队）→ 原子认领后逐个切片（clip_range + 弹幕烧录）→ 回写 video_id → 发 `clip.generated`（`kind="candidate"`）→ 外部邮件服务按 `candidate.id` 去重发送 → 更新 notify_status。
 
 ## 12. 幂等与恢复汇总
 
@@ -485,8 +529,9 @@ sequenceDiagram
 | 直播场次 | `records.parent_id` | 事件与任务按场次幂等，不重复创建 |
 | 分析进度 | `(platform, room_id, live_id)` | 启动时 running → interrupted；按 `processed_until_ms` 续跑 |
 | 候选 | `(platform, room_id, parent_id, start_ms, end_ms)` 唯一键 | 冲突不重复插入 |
-| 切片任务 | 候选 `status` + `video_id` | 启动时 clipping → ready；重试前检查 ready |
+| 切片任务 | 候选 `status` 原子认领（`UPDATE … WHERE status='ready'`）+ `video_id` | 启动时 clipping → ready；认领失败即跳过 |
 | 通知 | 候选 `id`（uuid）+ `notify_status` | 邮件服务按 id 去重；重试不重复生成切片 |
+| 检测状态 | `detection_states`（platform, room_id） | 启动恢复全部字段并按 `next_retry_at` 继续；用户重新启用强制复位 |
 | 通用任务 | `tasks` 表 | 沿用 `finish_pending_tasks` |
 
 ## 13. 验证策略
@@ -500,7 +545,7 @@ sequenceDiagram
 - ttwid 获取与空响应重建路径；
 - 验证页特征串命中测试。
 
-**单元测试清单**：各输入形态的 URL 归一；窗口映射（边界、末段排除、safety margin）；状态机 8 条转换 + UNKNOWN/退避/熔断；候选合并与唯一键去重；`CandidateClipPayload` 序列化兼容（旧 `clip.generated` 订阅者视角）；退避序列 `[10,30,60,120,240,300]`。
+**单元测试清单**：各输入形态的 URL 归一；窗口映射（边界、末段排除、safety margin、段内相对时间轴）；状态机 8 条转换 + UNKNOWN/退避/熔断；候选合并与唯一键去重；并发原子认领（两任务同时认领仅一个成功）；`ClipPayload` 两种 `kind` 的序列化/反序列化兼容（含旧字段视图）；检测状态持久化与重启恢复（熔断不被重启绕过）；web_rid 校验与刷新路径（模拟房间级失败回退）；退避序列 `[10,30,60,120,240,300]`。
 
 **集成验证**：回放已录直播检查分析漏选/误选/重复（`PH-002`）；双端（桌面 + Docker Web）全流程（`PH-003`）。
 
@@ -518,13 +563,14 @@ sequenceDiagram
 ## 15. 开放项与风险
 
 - 用户级接口字段与在播响应形态必须在 `W1` 复测（`RISK-008`）；`info_by_user` 在播形态无样本，若复测失败由主通道 + 房间级兜底承接。
-- 全量巡检与退避参数为参考实现经验值（`RVW-009` 评审确认）。
+- 全量巡检参数为参考实现经验值（`RVW-009` 评审确认）；基础间隔、退避上限与熔断恢复已按 `RVW-001`/`RVW-002`/`RVW-005` 收敛。
 - PowerLive 字幕后端密钥硬编码（`BASE-010`），依赖该后端前需配置化。
 - 分析的字幕/抽帧成本上限并入 `RISK-005`，详设参数可调。
-- `clip.generated` 的 `CandidateClipPayload` 采用 untagged 兼容扩展，实现时补序列化兼容测试。
+- `ClipPayload` 显式判别字段实现时需同步更新全部调用点与文档示例（`docs/usage/features/webhook.md`）。
 
 ## 16. 修订记录
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
 | `0.1` | `2026-10-14` | 依据 `DY-AUTO-001` v0.6、`FDES-001` v0.3 编制：监测层、添加流程、分析引擎、切片通知、配置、接口、前端（桌面/Web）、验证与实施顺序。 |
+| `0.2` | `2026-10-14` | 按评审意见修订：明确分析以录制段为粒度与 `LiveEnd` 汇总收尾；`web_rid` 校验与刷新；`room_id`/`web_rid` 语义与消费点审计；切片原子认领；`ClipPayload` 显式判别；检测状态持久化（`detection_states`）；参数收敛同步。 |
