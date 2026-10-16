@@ -41,6 +41,10 @@ pub async fn add_recorder(
     mut extra: String,
 ) -> Result<RecorderRow, String> {
     let platform = PlatformType::from_str(&platform).map_err(|e| e.to_string())?;
+    let mut identifier_type = "room".to_string();
+    let mut web_rid = None;
+    let mut profile_name = String::new();
+    let mut profile_avatar = String::new();
     if platform == PlatformType::Youtube {
         room_id = youtube::normalize_room_id(&room_id).map_err(|error| error.to_string())?;
     }
@@ -59,10 +63,29 @@ pub async fn add_recorder(
         }
         PlatformType::Douyin => {
             let client = reqwest::Client::new();
-            let sec_uid = douyin::api::get_room_owner_sec_uid(&client, &room_id)
+            match douyin::api::normalize_douyin_identifier(&room_id)
                 .await
-                .map_err(|e| e.to_string())?;
-            extra = sec_uid;
+                .map_err(|_| "无法识别抖音主播，请输入主页链接、分享短链、sec_uid 或直播间链接".to_string())?
+            {
+                douyin::api::DouyinIdentifier::Room(normalized_room_id) => {
+                    let sec_uid = douyin::api::get_room_owner_sec_uid(&client, &normalized_room_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    room_id = normalized_room_id.clone();
+                    extra = sec_uid;
+                    web_rid = Some(normalized_room_id);
+                }
+                douyin::api::DouyinIdentifier::Profile(sec_uid) => {
+                    let profile = douyin::api::get_public_profile(&client, &sec_uid)
+                        .await
+                        .map_err(|_| "无法验证抖音主播主页，请检查链接或 sec_uid".to_string())?;
+                    room_id = profile.sec_uid;
+                    extra = room_id.clone();
+                    identifier_type = "profile".to_string();
+                    profile_name = profile.nickname;
+                    profile_avatar = profile.avatar;
+                }
+            }
 
             if let Ok(account) = state.db.get_account_by_platform("douyin").await {
                 Ok(account.to_account())
@@ -128,11 +151,32 @@ pub async fn add_recorder(
     match account {
         Ok(account) => match state
             .recorder_manager
-            .add_recorder(&account, platform, &room_id, &extra, true)
+            .add_recorder_with_identity(
+                &account,
+                platform,
+                &room_id,
+                &extra,
+                &identifier_type,
+                web_rid.as_deref(),
+                &profile_name,
+                &profile_avatar,
+                true,
+            )
             .await
         {
             Ok(()) => {
-                let room = state.db.add_recorder(platform, &room_id, &extra).await?;
+                let room = state
+                    .db
+                    .add_recorder_with_identity(
+                        platform,
+                        &room_id,
+                        &extra,
+                        &identifier_type,
+                        None,
+                        &profile_name,
+                        &profile_avatar,
+                    )
+                    .await?;
                 state
                     .db
                     .new_message("添加直播间", &format!("添加了新直播间 {room_id}"))

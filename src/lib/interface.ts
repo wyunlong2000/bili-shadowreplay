@@ -38,6 +38,15 @@ export interface RecorderInfo {
   live_id: string;
   recording: boolean;
   enabled: boolean;
+  detection_status: string;
+  detection_error_kind: string;
+  last_checked_at: number;
+  last_success_at: number;
+  next_retry_at: number;
+  consecutive_unknown: number;
+  room_resolved: boolean;
+  identifier_type: string;
+  web_rid: string | null;
 }
 
 export interface RecorderList {

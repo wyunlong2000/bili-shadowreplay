@@ -220,8 +220,7 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
 
     // ----- shared lifecycle -------------------------------------------------
 
-    /// One poll of the room status: store metadata, emit live start/end
-    /// events, and report whether a recording attempt should be made.
+    /// 探测一次直播状态，更新元数据和检测结果，并触发直播及录制生命周期事件。
     async fn check_live(&self) -> bool {
         let platform = self.platform().as_str();
         let room_id = self.room_id();
@@ -230,6 +229,9 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
 
         match self.poll_room().await {
             Ok(poll) => {
+                if self.uses_detection_backoff() {
+                    self.record_detection_success(poll.live).await;
+                }
                 let mut metadata_changed = previous_room.room_title != poll.room_title
                     || previous_room.room_cover != poll.room_cover;
                 *self.room_info().write().await = RoomInfo {
@@ -296,13 +298,16 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
                 self.poll_stream().await
             }
             Err(error) => {
+                if self.uses_detection_backoff() {
+                    self.record_detection_failure(&error).await;
+                }
                 if self.is_throttled(&error) {
-                    log::info!("[{platform}][{room_id}] Throttled, backing off");
+                    log::info!("[{platform}][{room_id}] 触发限流，进入退避");
                     return false;
                 }
                 // The poll failed: the live may have started or ended, keep
                 // the previous status until the next poll.
-                log::warn!("[{platform}][{room_id}] Update room status failed: {error}");
+                log::warn!("[{platform}][{room_id}] 更新直播状态失败：{error}");
                 pre_live_status
             }
         }
@@ -543,8 +548,7 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
         }
     }
 
-    /// The recording loop: poll the room status, record while it is live, and
-    /// poll again after a short delay. The task is stored in `record_task`.
+    /// 启动直播状态轮询和录制循环，并在抖音重启后遵守已保存的重试时间。
     async fn run_recording_loop(&self) {
         if self
             .danmu_config()
@@ -557,7 +561,18 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
         *self.record_task().lock().await = Some(tokio::spawn(async move {
             let platform = recorder.platform().as_str();
             let room_id = recorder.room_id();
-            log::info!("[{platform}][{room_id}] Start running recorder");
+            log::info!("[{platform}][{room_id}] 开始运行录制器");
+
+            if recorder.uses_detection_backoff()
+                && recorder
+                    .detection_state()
+                    .read()
+                    .await
+                    .consecutive_unknown
+                    > 0
+            {
+                recorder.wait_for_detection_retry().await;
+            }
 
             while !recorder.quit().load(Ordering::Relaxed) {
                 if recorder.check_live().await {
@@ -623,16 +638,59 @@ pub trait PlatformApi: RecorderTrait + Clone + Send + Sync + 'static {
 
                     // An expired stream resumes immediately with a fresh one.
                     if recorder.should_continue().load(Ordering::Relaxed) || restart_immediately {
+                        if recorder.uses_detection_backoff() {
+                            let unknown = recorder
+                                .detection_state()
+                                .read()
+                                .await
+                                .consecutive_unknown
+                                > 0;
+                            if unknown {
+                                recorder.wait_for_detection_retry().await;
+                            } else {
+                                tokio::time::sleep(recorder.current_poll_delay().await).await;
+                            }
+                        }
                         continue;
                     }
                     // Check status again after a short random delay.
-                    let secs = rand::random::<u64>() % 4 + 2;
-                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    let delay = if recorder.uses_detection_backoff() {
+                        let unknown = recorder
+                            .detection_state()
+                            .read()
+                            .await
+                            .consecutive_unknown
+                            > 0;
+                        if unknown {
+                            recorder.wait_for_detection_retry().await;
+                            continue;
+                        }
+                        recorder.current_poll_delay().await
+                    } else {
+                        let secs = rand::random::<u64>() % 4 + 2;
+                        Duration::from_secs(secs)
+                    };
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
 
                 let interval = recorder.update_interval().load(Ordering::Relaxed);
-                tokio::time::sleep(status_poll_delay(interval)).await;
+                let delay = if recorder.uses_detection_backoff() {
+                    let unknown = recorder
+                        .detection_state()
+                        .read()
+                        .await
+                        .consecutive_unknown
+                        > 0;
+                    if unknown {
+                        recorder.wait_for_detection_retry().await;
+                        continue;
+                    }
+                    recorder.current_poll_delay().await
+                } else {
+                    status_poll_delay(interval)
+                };
+                tokio::time::sleep(delay).await;
             }
             log::info!("[{platform}][{room_id}] Recording thread quit.");
         }));

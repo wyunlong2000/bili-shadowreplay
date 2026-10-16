@@ -5,9 +5,27 @@ use deno_core::JsRuntime;
 use deno_core::RuntimeOptions;
 use regex::Regex;
 use reqwest::Client;
+use serde::Deserialize;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::{sleep_until, Instant};
+use url::Url;
 use uuid::Uuid;
 
 use super::response::DouyinRoomInfoResponse;
+
+static DOUYIN_API_NEXT_REQUEST: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+/// 为进程内的抖音监测和元数据请求分配全局请求时隙。
+async fn wait_for_douyin_api_slot() {
+    let next_request = DOUYIN_API_NEXT_REQUEST.get_or_init(|| Mutex::new(Instant::now()));
+    let mut next_request = next_request.lock().await;
+    if *next_request > Instant::now() {
+        sleep_until(*next_request).await;
+    }
+    *next_request = Instant::now() + Duration::from_secs(30);
+}
 
 #[derive(Debug, Clone)]
 pub struct DouyinBasicRoomInfo {
@@ -21,6 +39,544 @@ pub struct DouyinBasicRoomInfo {
     pub user_name: String,
     pub user_avatar: String,
     pub sec_user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DouyinIdentifier {
+    Room(String),
+    Profile(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DouyinProfileInfo {
+    pub sec_uid: String,
+    pub nickname: String,
+    pub avatar: String,
+}
+
+#[derive(Default)]
+pub struct DouyinApiSession {
+    pub cookies: String,
+    last_empty_refresh: Option<Instant>,
+    web_id: String,
+    uifid: String,
+    verify_fp: String,
+}
+
+impl DouyinApiSession {
+    /// 使用已保存的抖音账号 Cookie 创建接口会话。
+    pub fn new(cookies: String) -> Self {
+        let web_id = cookie_value(&cookies, "webid")
+            .or_else(|| cookie_value(&cookies, "s_v_web_id"))
+            .map(str::to_string)
+            .unwrap_or_else(generate_web_id);
+        let verify_fp = cookie_value(&cookies, "verifyFp")
+            .or_else(|| cookie_value(&cookies, "verify_fp"))
+            .map(str::to_string)
+            .unwrap_or_else(generate_verify_fp);
+        Self {
+            cookies,
+            last_empty_refresh: None,
+            web_id,
+            uifid: generate_uifid(),
+            verify_fp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DouyinProfileLiveInfo {
+    pub live: bool,
+    pub web_rid: Option<String>,
+    pub nickname: String,
+    pub avatar: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DouyinPublicProfileResponse {
+    status_code: Option<i64>,
+    user_info: Option<DouyinPublicProfileUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DouyinPublicProfileUser {
+    sec_uid: Option<String>,
+    nickname: Option<String>,
+    avatar_thumb: Option<DouyinPublicProfileAvatar>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DouyinPublicProfileAvatar {
+    url_list: Option<Vec<String>>,
+}
+
+/// 判断域名是否属于抖音主页或短链服务。
+fn is_douyin_host(host: &str) -> bool {
+    host == "douyin.com"
+        || host.ends_with(".douyin.com")
+        || host == "iesdouyin.com"
+        || host.ends_with(".iesdouyin.com")
+}
+
+/// 校验抖音 sec_uid 的前缀、长度和字符集。
+fn is_sec_uid(value: &str) -> bool {
+    value.starts_with("MS4wLjAB")
+        && value.len() >= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// 从抖音主页或直播间链接中提取稳定标识。
+fn identify_douyin_url(url: &Url) -> Option<DouyinIdentifier> {
+    let host = url.host_str()?;
+    if !is_douyin_host(host) {
+        return None;
+    }
+
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if host == "live.douyin.com" {
+        if let Some(room_id) = segments.first().filter(|value| value.bytes().all(|b| b.is_ascii_digit())) {
+            return Some(DouyinIdentifier::Room((*room_id).to_string()));
+        }
+    }
+
+    for pair in segments.windows(2) {
+        if pair[0] == "user" && is_sec_uid(pair[1]) {
+            return Some(DouyinIdentifier::Profile(pair[1].to_string()));
+        }
+    }
+    None
+}
+
+/// 解析抖音主播输入，限制短链跳转仅访问抖音域名。
+pub async fn normalize_douyin_identifier(
+    input: &str,
+) -> Result<DouyinIdentifier, RecorderError> {
+    let input = input.trim();
+    if input.bytes().all(|byte| byte.is_ascii_digit()) && !input.is_empty() {
+        return Ok(DouyinIdentifier::Room(input.to_string()));
+    }
+    if is_sec_uid(input) {
+        return Ok(DouyinIdentifier::Profile(input.to_string()));
+    }
+
+    let input = input.strip_prefix("bsr://").map_or_else(
+        || input.to_string(),
+        |value| format!("https://{value}"),
+    );
+    let mut url = Url::parse(&input).map_err(|_| RecorderError::InvalidValue)?;
+    if url.scheme() != "https" && url.scheme() != "http" {
+        return Err(RecorderError::InvalidValue);
+    }
+    if !url.host_str().is_some_and(is_douyin_host) {
+        return Err(RecorderError::InvalidValue);
+    }
+    if let Some(identifier) = identify_douyin_url(&url) {
+        return Ok(identifier);
+    }
+
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.stop();
+            }
+            if attempt.url().host_str().is_some_and(is_douyin_host) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()?;
+    let mut headers = generate_user_agent_header();
+    headers.insert(
+        "Referer",
+        reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
+    );
+    wait_for_douyin_api_slot().await;
+    let response = client.get(url.clone()).headers(headers).send().await?;
+    url = response.url().clone();
+    if !response.status().is_success() {
+        return Err(RecorderError::InvalidValue);
+    }
+    identify_douyin_url(&url).ok_or(RecorderError::InvalidValue)
+}
+
+/// 查询公开抖音主页资料并校验主播标识。
+pub async fn get_public_profile(
+    client: &Client,
+    sec_uid: &str,
+) -> Result<DouyinProfileInfo, RecorderError> {
+    if !is_sec_uid(sec_uid) {
+        return Err(RecorderError::InvalidValue);
+    }
+    let url = Url::parse_with_params(
+        "https://www.iesdouyin.com/web/api/v2/user/info/",
+        &[("sec_uid", sec_uid)],
+    )
+    .map_err(|_| RecorderError::InvalidValue)?;
+    let mut headers = generate_user_agent_header();
+    headers.insert(
+        "Referer",
+        reqwest::header::HeaderValue::from_static("https://www.iesdouyin.com/"),
+    );
+    wait_for_douyin_api_slot().await;
+    let response = client.get(url).headers(headers).send().await?;
+    if !response.status().is_success() {
+        return Err(RecorderError::InvalidValue);
+    }
+    let profile = response
+        .json::<DouyinPublicProfileResponse>()
+        .await
+        .map_err(|_| RecorderError::InvalidResponse)?;
+    let user = profile
+        .user_info
+        .filter(|_| profile.status_code == Some(0))
+        .ok_or(RecorderError::InvalidValue)?;
+    let nickname = user.nickname.unwrap_or_default().trim().to_string();
+    let actual_sec_uid = user.sec_uid.unwrap_or_default();
+    if nickname.is_empty() || actual_sec_uid != sec_uid {
+        return Err(RecorderError::InvalidValue);
+    }
+    let avatar = user
+        .avatar_thumb
+        .and_then(|avatar| avatar.url_list)
+        .and_then(|urls| urls.into_iter().next())
+        .unwrap_or_default();
+
+    Ok(DouyinProfileInfo {
+        sec_uid: actual_sec_uid,
+        nickname,
+        avatar,
+    })
+}
+
+/// 确保抖音接口会话包含 ttwid Cookie。
+pub async fn ensure_douyin_session(
+    client: &Client,
+    session: &mut DouyinApiSession,
+) -> Result<(), RecorderError> {
+    if cookie_value(&session.cookies, "ttwid").is_some() {
+        return Ok(());
+    }
+    refresh_ttwid(client, session).await
+}
+
+/// 按 sec_uid 查询主页开播状态，并解析开播时的有效直播间号。
+pub async fn check_user_live_by_profile_api(
+    client: &Client,
+    session: &mut DouyinApiSession,
+    sec_user_id: &str,
+) -> Result<DouyinProfileLiveInfo, RecorderError> {
+    if !is_sec_uid(sec_user_id) {
+        return Err(RecorderError::InvalidValue);
+    }
+    ensure_douyin_session(client, session).await?;
+
+    let mut response_body = request_profile_other(client, session, sec_user_id).await?;
+    if response_body.trim().is_empty() {
+        let can_refresh = session
+            .last_empty_refresh
+            .is_none_or(|last_refresh| last_refresh.elapsed() >= Duration::from_secs(60));
+        if !can_refresh {
+            return Err(RecorderError::ApiError {
+                error: "抖音主页接口返回空响应".to_string(),
+            });
+        }
+        refresh_ttwid(client, session).await?;
+        session.last_empty_refresh = Some(Instant::now());
+        response_body = request_profile_other(client, session, sec_user_id).await?;
+    }
+    if response_body.trim().is_empty() {
+        return Err(RecorderError::ApiError {
+            error: "抖音主页接口重建会话后仍返回空响应".to_string(),
+        });
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&response_body).map_err(|_| {
+        let body_lower = response_body.to_ascii_lowercase();
+        if body_lower.contains("captcha")
+            || body_lower.contains("verify_page")
+            || body_lower.contains("security_verify")
+            || body_lower.contains("/verify/")
+            || response_body.contains("验证码")
+            || response_body.contains("安全验证")
+        {
+            RecorderError::ApiError {
+                error: "抖音主页接口触发安全验证".to_string(),
+            }
+        } else {
+            RecorderError::InvalidResponse
+        }
+    })?;
+    if response
+        .get("status_code")
+        .and_then(serde_json::Value::as_i64)
+        != Some(0)
+    {
+        return Err(RecorderError::ApiError {
+            error: "抖音主页接口返回错误状态".to_string(),
+        });
+    }
+    let user = response
+        .get("user")
+        .ok_or(RecorderError::InvalidResponse)?;
+    let actual_sec_uid = user
+        .get("sec_uid")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if actual_sec_uid != sec_user_id {
+        return Err(RecorderError::ApiError {
+            error: "抖音主页接口返回的主播标识不匹配".to_string(),
+        });
+    }
+    let live_status = user
+        .get("live_status")
+        .and_then(parse_integer_value)
+        .ok_or(RecorderError::InvalidResponse)?;
+    let live = live_status != 0;
+    let nickname = user
+        .get("nickname")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let avatar = ["avatar_300x300", "avatar_larger", "avatar_thumb"]
+        .into_iter()
+        .find_map(|key| {
+            user.get(key)?
+                .get("url_list")?
+                .as_array()?
+                .iter()
+                .find_map(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let web_rid = if live {
+        Some(extract_profile_web_rid(user).ok_or_else(|| RecorderError::ApiError {
+            error: "抖音主页接口确认开播，但未返回有效直播间号".to_string(),
+        })?)
+    } else {
+        None
+    };
+
+    Ok(DouyinProfileLiveInfo {
+        live,
+        web_rid,
+        nickname,
+        avatar,
+    })
+}
+
+/// 生成签名参数并请求抖音主页用户接口。
+async fn request_profile_other(
+    client: &Client,
+    session: &DouyinApiSession,
+    sec_user_id: &str,
+) -> Result<String, RecorderError> {
+    let mut headers = generate_user_agent_header();
+    headers.insert(
+        "Referer",
+        reqwest::header::HeaderValue::from_str(&format!(
+            "https://www.douyin.com/user/{sec_user_id}"
+        ))
+        .map_err(|_| RecorderError::InvalidValue)?,
+    );
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        reqwest::header::HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/155.0.0.0",
+        ),
+    );
+    headers.insert(
+        "Cookie",
+        crate::utils::header_value("Cookie", &session.cookies)?,
+    );
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let ms_token = generate_ms_token().await;
+    let mut url = Url::parse("https://www.douyin.com/aweme/v1/web/user/profile/other/")
+        .map_err(|_| RecorderError::InvalidValue)?;
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("device_platform", "webapp")
+            .append_pair("aid", "6383")
+            .append_pair("channel", "channel_pc_web")
+            .append_pair("publish_video_strategy_type", "2")
+            .append_pair("source", "channel_pc_web")
+            .append_pair("sec_user_id", sec_user_id)
+            .append_pair("personal_center_strategy", "1")
+            .append_pair("profile_other_record_enable", "1")
+            .append_pair("land_to", "1")
+            .append_pair("update_version_code", "170400")
+            .append_pair("pc_client_type", "1")
+            .append_pair("pc_libra_divert", "Windows")
+            .append_pair("support_h265", "1")
+            .append_pair("support_dash", "1")
+            .append_pair("version_code", "170400")
+            .append_pair("version_name", "17.4.0")
+            .append_pair("cookie_enabled", "true")
+            .append_pair("screen_width", "2048")
+            .append_pair("screen_height", "1281")
+            .append_pair("browser_language", "zh-CN")
+            .append_pair("browser_platform", "Win32")
+            .append_pair("browser_name", "Edge")
+            .append_pair("browser_version", "155.0.0.0")
+            .append_pair("browser_online", "true")
+            .append_pair("engine_name", "Blink")
+            .append_pair("engine_version", "155.0.0.0")
+            .append_pair("os_name", "Windows")
+            .append_pair("os_version", "10")
+            .append_pair("cpu_core_num", "14")
+            .append_pair("device_memory", "32")
+            .append_pair("platform", "PC")
+            .append_pair("downlink", "10")
+            .append_pair("effective_type", "4g")
+            .append_pair("round_trip_time", "50")
+            .append_pair("webid", &session.web_id)
+            .append_pair("uifid", &session.uifid)
+            .append_pair("verifyFp", &session.verify_fp)
+            .append_pair("fp", &session.verify_fp)
+            .append_pair("msToken", &ms_token);
+    }
+    let params = url.query().unwrap_or_default().to_string();
+    let a_bogus = generate_a_bogus(&params, user_agent).await?;
+    url.query_pairs_mut().append_pair("a_bogus", &a_bogus);
+
+    wait_for_douyin_api_slot().await;
+    let response = client.get(url).headers(headers).send().await?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN
+        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return Err(RecorderError::SecurityControlError);
+    }
+    if !response.status().is_success() {
+        return Err(RecorderError::ApiError {
+            error: format!("抖音主页接口请求失败：{}", response.status()),
+        });
+    }
+    Ok(response.text().await?)
+}
+
+/// 请求抖音主页以刷新会话中的 ttwid Cookie。
+async fn refresh_ttwid(
+    client: &Client,
+    session: &mut DouyinApiSession,
+) -> Result<(), RecorderError> {
+    let mut refreshed_cookies = session.cookies.clone();
+    remove_cookie(&mut refreshed_cookies, "ttwid");
+    for url in ["https://live.douyin.com/", "https://www.douyin.com/"] {
+        let mut headers = generate_user_agent_header();
+        headers.insert(
+            "Referer",
+            reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
+        );
+        wait_for_douyin_api_slot().await;
+        let Ok(response) = client.get(url).headers(headers).send().await else {
+            continue;
+        };
+        if let Some(value) = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|header| header.to_str().ok())
+            .find_map(|header| {
+                let cookie = header.split(';').next()?.trim();
+                cookie.strip_prefix("ttwid=").map(str::to_string)
+            })
+        {
+            set_cookie(&mut refreshed_cookies, "ttwid", &value);
+            session.cookies = refreshed_cookies;
+            return Ok(());
+        }
+    }
+    Err(RecorderError::ApiError {
+        error: "抖音会话初始化失败，请检查账号 Cookie".to_string(),
+    })
+}
+
+/// 从 Cookie 字符串中查找指定名称的非空值。
+fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    cookies.split(';').find_map(|cookie| {
+        let (key, value) = cookie.trim().split_once('=')?;
+        (key == name && !value.trim().is_empty()).then_some(value.trim())
+    })
+}
+
+/// 从 Cookie 字符串中移除指定名称的条目。
+fn remove_cookie(cookies: &mut String, name: &str) {
+    *cookies = cookies
+        .split(';')
+        .map(str::trim)
+        .filter(|cookie| {
+            cookie
+                .split_once('=')
+                .is_none_or(|(key, _)| key != name)
+        })
+        .filter(|cookie| !cookie.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+}
+
+/// 在 Cookie 字符串中新增或替换指定条目。
+fn set_cookie(cookies: &mut String, name: &str, value: &str) {
+    remove_cookie(cookies, name);
+    if !cookies.is_empty() {
+        cookies.push_str("; ");
+    }
+    cookies.push_str(name);
+    cookies.push('=');
+    cookies.push_str(value);
+}
+
+/// 将 JSON 整数或数字字符串解析为有符号整数。
+fn parse_integer_value(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+/// 从用户主页响应中提取可用于房间接口的 web_rid。
+fn extract_profile_web_rid(user: &serde_json::Value) -> Option<String> {
+    if let Some(web_rid) = user.get("web_rid").and_then(parse_room_identifier) {
+        return Some(web_rid);
+    }
+    for key in ["room", "live_room"] {
+        if let Some(room) = user.get(key) {
+            if let Some(web_rid) = room
+                .get("web_rid")
+                .or_else(|| room.get("room_id"))
+                .or_else(|| room.get("room_id_str"))
+                .and_then(parse_room_identifier)
+            {
+                return Some(web_rid);
+            }
+        }
+    }
+    let room_data = user.get("room_data")?;
+    let room_data = match room_data {
+        serde_json::Value::String(value) => serde_json::from_str(value).ok()?,
+        value => value.clone(),
+    };
+    room_data
+        .get("owner")
+        .and_then(|owner| owner.get("web_rid"))
+        .and_then(parse_room_identifier)
+        .or_else(|| room_data.get("web_rid").and_then(parse_room_identifier))
+}
+
+/// 将字符串或数字形式的直播间号规范为数字字符串。
+fn parse_room_identifier(value: &serde_json::Value) -> Option<String> {
+    let value = value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_u64().map(|value| value.to_string()))?;
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
 }
 
 fn setup_js_runtime() -> Result<JsRuntime, RecorderError> {
@@ -57,9 +613,26 @@ async fn generate_a_bogus(params: &str, user_agent: &str) -> Result<String, Reco
 }
 
 async fn generate_ms_token() -> String {
-    // generate a random 32 characters uuid string
+    // 生成随机 UUID 作为临时 msToken。
     let uuid = Uuid::new_v4();
     uuid.to_string()
+}
+
+/// 生成抖音主页接口使用的 webid。
+fn generate_web_id() -> String {
+    let value = Uuid::new_v4().as_u128() as u64;
+    (1_000_000_000_000_000_000 + value % 9_000_000_000_000_000_000).to_string()
+}
+
+/// 生成抖音主页接口使用的设备标识。
+fn generate_uifid() -> String {
+    let value = Uuid::new_v4().simple().to_string();
+    format!("{value}{value}{value}{value}")
+}
+
+/// 生成抖音主页接口使用的验证指纹。
+fn generate_verify_fp() -> String {
+    format!("verify_{}", Uuid::new_v4().simple())
 }
 
 pub fn generate_user_agent_header() -> reqwest::header::HeaderMap {
@@ -150,6 +723,7 @@ pub async fn get_room_info(
             "https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=MacIntel&browser_name=Chrome&browser_version=122.0.0.0&web_rid={room_id}&ms_token={ms_token}&a_bogus={a_bogus}"
         );
 
+    wait_for_douyin_api_slot().await;
     let resp = client.get(&url).headers(headers).send().await?;
 
     let status = resp.status();
@@ -216,6 +790,7 @@ pub async fn get_room_info_h5(
         crate::utils::header_value("Cookie", &account.cookies)?,
     );
 
+    wait_for_douyin_api_slot().await;
     let resp = client.get(&url).headers(headers).send().await?;
 
     let status = resp.status();
@@ -331,6 +906,7 @@ pub async fn get_user_info(
         crate::utils::header_value("Cookie", &account.cookies)?,
     );
 
+    wait_for_douyin_api_slot().await;
     let resp = client.get(url).headers(headers).send().await?;
 
     let status = resp.status();
@@ -396,6 +972,7 @@ pub async fn get_room_owner_sec_uid(
         "Referer",
         reqwest::header::HeaderValue::from_static("https://live.douyin.com/"),
     );
+    wait_for_douyin_api_slot().await;
     let resp = client.get(url).headers(headers).send().await?;
     let status = resp.status();
     let text = resp.text().await?;

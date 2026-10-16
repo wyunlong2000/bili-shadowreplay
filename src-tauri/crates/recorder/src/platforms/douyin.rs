@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use danmu_stream::provider::ProviderType;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::account::Account;
 use crate::errors::RecorderError;
@@ -19,8 +19,8 @@ use crate::platforms::douyin::stream_info::{
     collect_available_streams, AvailableStream, DouyinStream,
 };
 use crate::platforms::PlatformType;
-use crate::traits::RecorderTrait;
-use crate::{Recorder, UserInfo};
+use crate::traits::{RecorderBasicTrait, RecorderTrait};
+use crate::{Recorder, RoomInfo, UserInfo};
 
 pub type DouyinRecorder = Recorder<DouyinExtra>;
 
@@ -35,6 +35,8 @@ pub struct DouyinExtra {
     /// deliberately kept out of `clear_stream` — clearing it there would wipe
     /// the just-polled stream on the poll that first sees the live.
     pending: Arc<RwLock<Option<api::DouyinBasicRoomInfo>>>,
+    /// 缓存 ttwid 与空响应后的会话重建时间。
+    api_session: Arc<Mutex<api::DouyinApiSession>>,
 }
 
 fn get_best_stream_url(stream: &DouyinStream) -> Option<String> {
@@ -76,7 +78,8 @@ fn log_douyin_stream_choice(room_id: &str, stream_data: &str, hls_pull_url: &str
 }
 
 impl DouyinRecorder {
-    pub fn new(
+    /// 创建抖音录制器，并设置主播标识类型和已知直播间号。
+    pub async fn new(
         room_id: &str,
         sec_user_id: &str,
         account: &Account,
@@ -84,8 +87,17 @@ impl DouyinRecorder {
         channel: impl Into<crate::events::RecorderEventSender>,
         update_interval: Arc<AtomicU64>,
         enabled: bool,
+        identifier_type: &str,
+        web_rid: Option<&str>,
+        profile_name: &str,
+        profile_avatar: &str,
     ) -> Result<Self, crate::errors::RecorderError> {
-        Ok(Self::with_extra(
+        let effective_web_rid = match identifier_type {
+            "room" => Some(room_id.to_string()),
+            "profile" => web_rid.map(str::to_string),
+            _ => return Err(RecorderError::InvalidValue),
+        };
+        let recorder = Self::with_extra(
             PlatformType::Douyin,
             room_id,
             account,
@@ -97,21 +109,178 @@ impl DouyinRecorder {
                 sec_user_id: sec_user_id.to_string(),
                 live_stream: Arc::new(RwLock::new(None)),
                 pending: Arc::new(RwLock::new(None)),
+                api_session: Arc::new(Mutex::new(api::DouyinApiSession::new(
+                    account.cookies.clone(),
+                ))),
             },
-        ))
+        );
+        recorder.set_identity_metadata(identifier_type, effective_web_rid);
+        if identifier_type == "profile" {
+            *recorder.room_info().write().await = RoomInfo {
+                platform: PlatformType::Douyin.as_str().to_string(),
+                room_id: room_id.to_string(),
+                room_title: profile_name.to_string(),
+                room_cover: profile_avatar.to_string(),
+                status: false,
+            };
+            *recorder.user_info().write().await = UserInfo {
+                user_id: sec_user_id.to_string(),
+                user_name: profile_name.to_string(),
+                user_avatar: profile_avatar.to_string(),
+            };
+        }
+        Ok(recorder)
+    }
+
+    /// 将主页接口确认的未开播状态转换为直播间轮询结果。
+    async fn profile_offline_poll(&self, profile: api::DouyinProfileLiveInfo) -> RoomPoll {
+        let current_room = self.room_info().read().await.clone();
+        let current_user = self.user_info().read().await.clone();
+        let nickname = if profile.nickname.is_empty() {
+            current_user.user_name
+        } else {
+            profile.nickname
+        };
+        let avatar = if profile.avatar.is_empty() {
+            current_user.user_avatar
+        } else {
+            profile.avatar
+        };
+
+        RoomPoll {
+            live: false,
+            room_title: if current_room.room_title.is_empty() {
+                nickname.clone()
+            } else {
+                current_room.room_title
+            },
+            room_cover: if current_room.room_cover.is_empty() {
+                avatar.clone()
+            } else {
+                current_room.room_cover
+            },
+            user: Some(UserInfo {
+                user_id: self.extra.sec_user_id.clone(),
+                user_name: nickname,
+                user_avatar: avatar,
+            }),
+            platform_live_id: None,
+        }
     }
 }
 
 #[async_trait]
 impl PlatformApi for DouyinRecorder {
     async fn poll_room(&self) -> Result<RoomPoll, RecorderError> {
-        let info = api::get_room_info(
+        let identifier_type = self.identifier_type();
+        let mut request_account = self.account().clone();
+        let (mut web_rid, resolved_now) = match self.effective_web_rid() {
+            Some(web_rid) => {
+                if identifier_type == "profile" {
+                    let mut session = self.extra.api_session.lock().await;
+                    api::ensure_douyin_session(&self.client(), &mut session).await?;
+                    request_account.cookies = session.cookies.clone();
+                }
+                (web_rid, false)
+            }
+            None if identifier_type == "profile" => {
+                let mut session = self.extra.api_session.lock().await;
+                let profile = api::check_user_live_by_profile_api(
+                    &self.client(),
+                    &mut session,
+                    &self.extra.sec_user_id,
+                )
+                .await?;
+                request_account.cookies = session.cookies.clone();
+                if !profile.live {
+                    return Ok(self.profile_offline_poll(profile).await);
+                }
+                (
+                    profile.web_rid.ok_or(RecorderError::NoRoomInfo)?,
+                    true,
+                )
+            }
+            None => return Err(RecorderError::NoRoomInfo),
+        };
+        let info = match api::get_room_info(
             &self.client,
-            &self.account,
-            &self.room_id,
+            &request_account,
+            &web_rid,
             &self.extra.sec_user_id,
         )
-        .await?;
+        .await
+        {
+            Ok(info) => {
+                info
+            }
+            Err(room_error) if identifier_type == "profile" => {
+                let consecutive_unknown =
+                    self.detection_state().read().await.consecutive_unknown;
+                if resolved_now || consecutive_unknown < 2 {
+                    return Err(room_error);
+                }
+                let profile_result = {
+                    let mut session = self.extra.api_session.lock().await;
+                    let result = api::check_user_live_by_profile_api(
+                        &self.client(),
+                        &mut session,
+                        &self.extra.sec_user_id,
+                    )
+                    .await;
+                    request_account.cookies = session.cookies.clone();
+                    result
+                };
+                match profile_result {
+                    Ok(profile) if !profile.live => {
+                        log::info!("抖音直播间接口查询失败，主页接口确认主播未开播");
+                        return Ok(self.profile_offline_poll(profile).await);
+                    }
+                    Ok(profile) => {
+                        let refreshed_web_rid =
+                            profile.web_rid.ok_or(RecorderError::NoRoomInfo)?;
+                        if refreshed_web_rid == web_rid {
+                            return Err(room_error);
+                        }
+                        log::info!("抖音主页接口确认仍在直播，更新直播间号后重试详情查询");
+                        let refreshed_info = api::get_room_info(
+                            &self.client,
+                            &request_account,
+                            &refreshed_web_rid,
+                            &self.extra.sec_user_id,
+                        )
+                        .await?;
+                        if refreshed_info.status != 0 {
+                            return Err(RecorderError::ApiError {
+                                error: "抖音主页接口确认开播，但直播间详情未确认开播".to_string(),
+                            });
+                        }
+                        web_rid = refreshed_web_rid;
+                        self.set_identity_metadata("profile", Some(web_rid.clone()));
+                        if self
+                            .event_channel()
+                            .send(crate::events::RecorderEvent::WebRidUpdated {
+                                platform: PlatformType::Douyin,
+                                room_id: self.room_id(),
+                                web_rid: web_rid.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            log::warn!("发送抖音直播间号更新事件失败");
+                        }
+                        refreshed_info
+                    }
+                    Err(profile_error) => {
+                        log::warn!("抖音直播间查询失败，主页状态复核也失败：{room_error}；{profile_error}");
+                        return Err(profile_error);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if resolved_now && info.status == 0 {
+            self.set_identity_metadata("profile", Some(web_rid));
+        }
         *self.extra.pending.write().await = Some(info.clone());
 
         Ok(RoomPoll {
@@ -219,7 +388,12 @@ mod tests {
             tx,
             Arc::new(AtomicU64::new(30)),
             true,
+            "room",
+            None,
+            "",
+            "",
         )
+        .await
         .unwrap();
         *recorder.extra.pending.write().await = Some(api::DouyinBasicRoomInfo {
             room_id_str: "123".to_string(),

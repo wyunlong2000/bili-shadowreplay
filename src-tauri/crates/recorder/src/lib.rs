@@ -23,7 +23,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
 pub struct RecorderInfo {
     pub room_info: RoomInfo,
     pub user_info: UserInfo,
@@ -31,6 +31,92 @@ pub struct RecorderInfo {
     pub live_id: String,
     pub recording: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub detection_status: String,
+    #[serde(default)]
+    pub detection_error_kind: String,
+    #[serde(default)]
+    pub last_checked_at: i64,
+    #[serde(default)]
+    pub last_success_at: i64,
+    #[serde(default)]
+    pub next_retry_at: i64,
+    #[serde(default)]
+    pub consecutive_unknown: u64,
+    #[serde(default)]
+    pub room_resolved: bool,
+    #[serde(default)]
+    pub identifier_type: String,
+    #[serde(default)]
+    pub web_rid: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DetectionState {
+    pub confirmed: Option<bool>,
+    pub last_checked_at: i64,
+    pub last_success_at: i64,
+    pub error_kind: DetectionErrorKind,
+    pub consecutive_unknown: u64,
+    pub next_retry_at: i64,
+    pub backoff_level: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DetectionErrorKind {
+    #[default]
+    None,
+    Network,
+    RateLimited,
+    RequestRejected,
+    AccountInvalid,
+    Verification,
+    Parse,
+}
+
+impl DetectionErrorKind {
+    /// 将数据库或接口中的错误分类字符串转换为监测错误类型。
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "network" => Self::Network,
+            "rate_limited" => Self::RateLimited,
+            "request_rejected" => Self::RequestRejected,
+            "account_invalid" => Self::AccountInvalid,
+            "verification" => Self::Verification,
+            "parse" => Self::Parse,
+            _ => Self::None,
+        }
+    }
+
+    /// 返回用于持久化和接口传输的错误分类标识。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Network => "network",
+            Self::RateLimited => "rate_limited",
+            Self::RequestRejected => "request_rejected",
+            Self::AccountInvalid => "account_invalid",
+            Self::Verification => "verification",
+            Self::Parse => "parse",
+        }
+    }
+}
+
+impl DetectionState {
+    /// 返回供界面展示的监测状态。
+    pub fn status(&self) -> &'static str {
+        if self.last_checked_at == 0 && self.confirmed.is_none() {
+            return "unconfirmed";
+        }
+        if self.consecutive_unknown > 0 {
+            return "unknown";
+        }
+        match self.confirmed {
+            Some(true) => "live",
+            Some(false) => "offline",
+            None => "unknown",
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
@@ -104,6 +190,11 @@ where
 
     /// The extra information for the recorder
     extra: T,
+    /// 录制器持久化的监测状态。
+    detection_state: Arc<RwLock<DetectionState>>,
+    identifier_type: Arc<std::sync::RwLock<String>>,
+    room_resolved: Arc<atomic::AtomicBool>,
+    effective_web_rid: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl<T: Send + Sync> Recorder<T> {
@@ -144,7 +235,27 @@ impl<T: Send + Sync> Recorder<T> {
             should_continue: Arc::new(atomic::AtomicBool::new(false)),
             update_interval,
             extra,
+            detection_state: Arc::new(RwLock::new(DetectionState::default())),
+            identifier_type: Arc::new(std::sync::RwLock::new("room".to_string())),
+            room_resolved: Arc::new(atomic::AtomicBool::new(true)),
+            effective_web_rid: Arc::new(std::sync::RwLock::new(
+                (platform == PlatformType::Douyin).then(|| room_id.to_string()),
+            )),
         }
+    }
+
+    /// 设置录制器的主播标识类型及其有效直播间号。
+    pub(crate) fn set_identity_metadata(
+        &self,
+        identifier_type: &str,
+        effective_web_rid: Option<String>,
+    ) {
+        *self.identifier_type.write().unwrap() = identifier_type.to_string();
+        self.room_resolved.store(
+            identifier_type != "profile" || effective_web_rid.is_some(),
+            atomic::Ordering::Relaxed,
+        );
+        *self.effective_web_rid.write().unwrap() = effective_web_rid;
     }
 }
 
@@ -245,6 +356,26 @@ impl<T: Send + Sync> traits::RecorderBasicTrait for Recorder<T> {
 
     fn should_continue(&self) -> &atomic::AtomicBool {
         &self.should_continue
+    }
+
+    fn detection_state(&self) -> Arc<RwLock<DetectionState>> {
+        self.detection_state.clone()
+    }
+
+    fn identifier_type(&self) -> String {
+        self.identifier_type.read().unwrap().clone()
+    }
+
+    fn room_resolved(&self) -> bool {
+        self.room_resolved.load(atomic::Ordering::Relaxed)
+    }
+
+    fn uses_detection_backoff(&self) -> bool {
+        self.platform == PlatformType::Douyin
+    }
+
+    fn effective_web_rid(&self) -> Option<String> {
+        self.effective_web_rid.read().unwrap().clone()
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::danmu::PREVIEW_EVENT_TYPES;
 use crate::platforms::PlatformType;
-use crate::RecorderInfo;
+use crate::{DetectionState, RecorderInfo};
 
 /// Preview consumers must be fast and non-blocking. Persistence is handled
 /// separately by the recorder, regardless of whether anybody watches a room.
@@ -12,6 +12,16 @@ pub use channel::{recorder_event_channel, RecorderEventReceiver, RecorderEventSe
 #[derive(Debug, Clone)]
 pub enum RecorderEvent {
     RoomMetadataUpdated,
+    DetectionUpdated {
+        platform: PlatformType,
+        room_id: String,
+        state: DetectionState,
+    },
+    WebRidUpdated {
+        platform: PlatformType,
+        room_id: String,
+        web_rid: String,
+    },
     LiveStart {
         recorder: RecorderInfo,
     },

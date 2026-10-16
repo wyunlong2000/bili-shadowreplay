@@ -507,6 +507,101 @@ fn get_migrations() -> Vec<Migration> {
             sql: "CREATE TABLE account_credential_cleanup (id INTEGER PRIMARY KEY);",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 18,
+            description: "add_automation_tables",
+            sql: r#"
+                CREATE TABLE automation_analysis (
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    processed_until_ms INTEGER NOT NULL DEFAULT 0,
+                    window_seconds INTEGER NOT NULL,
+                    subtitle_json TEXT,
+                    task_id TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, room_id, live_id)
+                );
+                CREATE TABLE automation_candidates (
+                    id TEXT PRIMARY KEY,
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    clip_task_id TEXT,
+                    video_id INTEGER,
+                    notify_status TEXT NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (platform, room_id, parent_id, start_ms, end_ms)
+                );
+                CREATE INDEX idx_candidates_parent
+                    ON automation_candidates (room_id, parent_id);
+                CREATE TABLE detection_states (
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    confirmed INTEGER,
+                    last_checked_at INTEGER NOT NULL DEFAULT 0,
+                    last_success_at INTEGER NOT NULL DEFAULT 0,
+                    error_kind TEXT NOT NULL DEFAULT '',
+                    consecutive_unknown INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER NOT NULL DEFAULT 0,
+                    backoff_level INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, room_id)
+                );
+            "#,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 19,
+            description: "add_recorder_web_rid",
+            sql: "ALTER TABLE recorders ADD COLUMN web_rid TEXT;",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 20,
+            description: "add_recorder_identifier_and_notification_tasks",
+            sql: r#"
+                ALTER TABLE recorders
+                    ADD COLUMN identifier_type TEXT NOT NULL DEFAULT 'room';
+                CREATE TABLE automation_notifications (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL UNIQUE,
+                    event_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_automation_notifications_retry
+                    ON automation_notifications (status, next_retry_at);
+            "#,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 21,
+            description: "add_douyin_profile_display_fields",
+            sql: r#"
+                ALTER TABLE recorders ADD COLUMN profile_name TEXT NOT NULL DEFAULT '';
+                ALTER TABLE recorders ADD COLUMN profile_avatar TEXT NOT NULL DEFAULT '';
+            "#,
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

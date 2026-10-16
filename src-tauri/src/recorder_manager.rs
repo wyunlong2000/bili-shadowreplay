@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::database::record::RecordRow;
-use crate::database::recorder::RecorderRow;
+use crate::database::recorder::{DetectionStateRow, RecorderRow};
 use crate::database::video::VideoRow;
 use crate::database::{Database, DatabaseError};
 use crate::events::{DataChange, EventBus};
@@ -30,7 +30,7 @@ use recorder::timeline::{align_danmus_to_recording, load_skipped_ad_ranges};
 use recorder::traits::RecorderTrait;
 use recorder::RoomInfo;
 use recorder::UserInfo;
-use recorder::{CachePath, RecorderInfo};
+use recorder::{CachePath, DetectionErrorKind, DetectionState, RecorderInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -218,7 +218,63 @@ impl RecorderManager {
                 RecorderEvent::RoomMetadataUpdated => {
                     self.db.notify_coalesced_change(DataChange::Recorders);
                 }
+                RecorderEvent::DetectionUpdated {
+                    platform,
+                    room_id,
+                    state,
+                } => {
+                    let row = DetectionStateRow {
+                        platform: platform.as_str().to_string(),
+                        room_id,
+                        confirmed: state.confirmed,
+                        last_checked_at: state.last_checked_at,
+                        last_success_at: state.last_success_at,
+                        error_kind: state.error_kind.as_str().to_string(),
+                        consecutive_unknown: i64::try_from(state.consecutive_unknown)
+                            .unwrap_or(i64::MAX),
+                        next_retry_at: state.next_retry_at,
+                        backoff_level: i64::from(state.backoff_level),
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    if let Err(error) = self.db.upsert_detection_state(&row).await {
+                        log::warn!("保存直播监测状态失败：{error}");
+                    } else {
+                        self.db.notify_coalesced_change(DataChange::Recorders);
+                    }
+                }
+                RecorderEvent::WebRidUpdated {
+                    platform,
+                    room_id,
+                    web_rid,
+                } => {
+                    if let Err(error) = self
+                        .db
+                        .update_recorder_web_rid(platform, &room_id, &web_rid)
+                        .await
+                    {
+                        log::warn!("保存抖音直播间号失败：{error}");
+                    } else {
+                        self.db.notify_change(DataChange::Recorders);
+                    }
+                }
                 RecorderEvent::LiveStart { recorder } => {
+                    if recorder.room_info.platform == PlatformType::Douyin.as_str()
+                        && recorder.identifier_type == "profile"
+                    {
+                        if let Some(web_rid) = recorder.web_rid.as_deref() {
+                            if let Err(error) = self
+                                .db
+                                .update_recorder_web_rid(
+                                    PlatformType::Douyin,
+                                    &recorder.room_info.room_id,
+                                    web_rid,
+                                )
+                                .await
+                            {
+                                log::warn!("保存抖音直播间号失败：{error}");
+                            }
+                        }
+                    }
                     self.db.notify_change(DataChange::Recorders);
                     let event = events::new_webhook_event(
                         events::LIVE_STARTED,
@@ -505,7 +561,21 @@ impl RecorderManager {
                 let room_id = recorder.room_id;
                 let auto_start = recorder.auto_start;
                 let extra = recorder.extra;
-                recorder_map.insert((platform, room_id), (auto_start, extra));
+                let web_rid = recorder.web_rid;
+                let identifier_type = recorder.identifier_type;
+                let profile_name = recorder.profile_name;
+                let profile_avatar = recorder.profile_avatar;
+                recorder_map.insert(
+                    (platform, room_id),
+                    (
+                        auto_start,
+                        extra,
+                        identifier_type,
+                        web_rid,
+                        profile_name,
+                        profile_avatar,
+                    ),
+                );
             }
             let mut recorders_to_add = Vec::new();
             for (platform, room_id) in recorder_map.keys() {
@@ -520,7 +590,14 @@ impl RecorderManager {
                 if self.is_migrating.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
-                let Some((auto_start, extra)) = recorder_map.get(&(platform, room_id.clone()))
+                let Some((
+                    auto_start,
+                    extra,
+                    identifier_type,
+                    web_rid,
+                    profile_name,
+                    profile_avatar,
+                )) = recorder_map.get(&(platform, room_id.clone()))
                 else {
                     continue;
                 };
@@ -546,7 +623,17 @@ impl RecorderManager {
                 };
 
                 if let Err(e) = self
-                    .add_recorder(&account, platform, &room_id, extra, *auto_start)
+                    .add_recorder_with_identity(
+                        &account,
+                        platform,
+                        &room_id,
+                        extra,
+                        identifier_type,
+                        web_rid.as_deref(),
+                        profile_name,
+                        profile_avatar,
+                        *auto_start,
+                    )
                     .await
                 {
                     log::error!(
@@ -567,6 +654,25 @@ impl RecorderManager {
         platform: PlatformType,
         room_id: &str,
         extra: &str,
+        enabled: bool,
+    ) -> Result<(), RecorderManagerError> {
+        self.add_recorder_with_identity(
+            account, platform, room_id, extra, "room", None, "", "", enabled,
+        )
+        .await
+    }
+
+    /// 按主播标识类型创建录制器，并恢复已保存的监测状态。
+    pub async fn add_recorder_with_identity(
+        &self,
+        account: &Account,
+        platform: PlatformType,
+        room_id: &str,
+        extra: &str,
+        identifier_type: &str,
+        web_rid: Option<&str>,
+        profile_name: &str,
+        profile_avatar: &str,
         enabled: bool,
     ) -> Result<(), RecorderManagerError> {
         let normalized_room_id = match platform {
@@ -598,15 +704,22 @@ impl RecorderManager {
                 enabled,
                 self.db.clone(),
             )?),
-            PlatformType::Douyin => Box::new(DouyinRecorder::new(
-                room_id,
-                extra,
-                account,
-                cache_dir,
-                event_tx,
-                update_interval,
-                enabled,
-            )?),
+            PlatformType::Douyin => Box::new(
+                DouyinRecorder::new(
+                    room_id,
+                    extra,
+                    account,
+                    cache_dir,
+                    event_tx,
+                    update_interval,
+                    enabled,
+                    identifier_type,
+                    web_rid,
+                    profile_name,
+                    profile_avatar,
+                )
+                .await?,
+            ),
             PlatformType::Douyu => Box::new(DouyuRecorder::new(
                 room_id,
                 account,
@@ -667,6 +780,22 @@ impl RecorderManager {
             events.publish_preview(&topic, &event);
         }));
         let recorder: Arc<dyn RecorderTrait + Send + Sync> = Arc::from(recorder_boxed);
+        if let Some(state) = self.db.get_detection_state(platform, room_id).await? {
+            recorder
+                .set_detection_state(DetectionState {
+                    confirmed: state.confirmed,
+                    last_checked_at: state.last_checked_at,
+                    last_success_at: state.last_success_at,
+                    error_kind: DetectionErrorKind::from_str(&state.error_kind),
+                    consecutive_unknown: u64::try_from(state.consecutive_unknown)
+                        .unwrap_or_default(),
+                    next_retry_at: state.next_retry_at,
+                    backoff_level: u32::try_from(state.backoff_level)
+                        .unwrap_or_default()
+                        .min(5),
+                })
+                .await;
+        }
         self.recorders
             .write()
             .await
@@ -1185,23 +1314,42 @@ impl RecorderManager {
         for recorder in recorders {
             // check if recorder is in recorder_set
             if !recorder_set.contains(&recorder.room_id.to_string()) {
+                let platform = recorder.platform.clone();
+                let identifier_type = recorder.identifier_type.clone();
+                let web_rid = if platform == PlatformType::Douyin.as_str() {
+                    if identifier_type == "room" {
+                        Some(recorder.room_id.clone())
+                    } else {
+                        recorder.web_rid.clone()
+                    }
+                } else {
+                    None
+                };
                 summary.recorders.push(RecorderInfo {
                     platform_live_id: "".to_string(),
                     live_id: "".to_string(),
                     recording: false,
                     enabled: false,
                     room_info: RoomInfo {
-                        platform: recorder.platform.as_str().to_string(),
+                        platform,
                         status: false,
                         room_id: recorder.room_id.to_string(),
-                        room_title: recorder.room_id.to_string(),
-                        room_cover: "".to_string(),
+                        room_title: if recorder.profile_name.is_empty() {
+                            recorder.room_id.to_string()
+                        } else {
+                            recorder.profile_name.clone()
+                        },
+                        room_cover: recorder.profile_avatar.clone(),
                     },
                     user_info: UserInfo {
-                        user_id: "".to_string(),
-                        user_name: "".to_string(),
-                        user_avatar: "".to_string(),
+                        user_id: recorder.room_id.clone(),
+                        user_name: recorder.profile_name.clone(),
+                        user_avatar: recorder.profile_avatar.clone(),
                     },
+                    room_resolved: identifier_type != "profile" || web_rid.is_some(),
+                    identifier_type,
+                    web_rid,
+                    ..RecorderInfo::default()
                 });
             }
         }
@@ -1756,6 +1904,7 @@ mod live_end_tests {
             user_info: UserInfo::default(),
             recording: false,
             enabled: true,
+            ..RecorderInfo::default()
         }
     }
 
