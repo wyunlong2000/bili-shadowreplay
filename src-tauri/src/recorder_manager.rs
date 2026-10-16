@@ -257,6 +257,15 @@ impl RecorderManager {
                         self.db.notify_change(DataChange::Recorders);
                     }
                 }
+                RecorderEvent::WebRidCleared { platform, room_id } => {
+                    if let Err(error) = self
+                        .db
+                        .clear_recorder_web_rid(platform, &room_id)
+                        .await
+                    {
+                        log::warn!("清除抖音直播间号失败：{error}");
+                    }
+                }
                 RecorderEvent::LiveStart { recorder } => {
                     if recorder.room_info.platform == PlatformType::Douyin.as_str()
                         && recorder.identifier_type == "profile"

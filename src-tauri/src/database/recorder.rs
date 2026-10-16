@@ -158,6 +158,23 @@ impl Database {
         Ok(())
     }
 
+    /// 清除主页标识对应的过期抖音直播间号。
+    pub async fn clear_recorder_web_rid(
+        &self,
+        platform: PlatformType,
+        room_id: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "UPDATE recorders SET web_rid = NULL WHERE platform = $1 AND room_id = $2 AND identifier_type = 'profile'",
+        )
+        .bind(platform.as_str())
+        .bind(room_id)
+        .execute(&self.pool)
+        .await?;
+        self.notify_change(DataChange::Recorders);
+        Ok(())
+    }
+
     /// 查询主播最近一次持久化的监测状态。
     pub async fn get_detection_state(
         &self,

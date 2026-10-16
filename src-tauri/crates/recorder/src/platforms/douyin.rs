@@ -167,6 +167,26 @@ impl DouyinRecorder {
             platform_live_id: None,
         }
     }
+
+    /// 清除已结束直播对应的动态直播间号，并通知持久化层。
+    async fn clear_profile_web_rid(&self) {
+        if self.identifier_type() != "profile" || self.effective_web_rid().is_none() {
+            return;
+        }
+        log::info!("抖音主播已确认未开播，清理过期直播间号");
+        self.set_identity_metadata("profile", None);
+        if self
+            .event_channel()
+            .send(crate::events::RecorderEvent::WebRidCleared {
+                platform: PlatformType::Douyin,
+                room_id: self.room_id(),
+            })
+            .await
+            .is_err()
+        {
+            log::warn!("发送抖音直播间号清理事件失败");
+        }
+    }
 }
 
 #[async_trait]
@@ -193,6 +213,7 @@ impl PlatformApi for DouyinRecorder {
                 .await?;
                 request_account.cookies = session.cookies.clone();
                 if !profile.live {
+                    self.clear_profile_web_rid().await;
                     return Ok(self.profile_offline_poll(profile).await);
                 }
                 (
@@ -233,6 +254,7 @@ impl PlatformApi for DouyinRecorder {
                 match profile_result {
                     Ok(profile) if !profile.live => {
                         log::info!("抖音直播间接口查询失败，主页接口确认主播未开播");
+                        self.clear_profile_web_rid().await;
                         return Ok(self.profile_offline_poll(profile).await);
                     }
                     Ok(profile) => {
@@ -278,6 +300,9 @@ impl PlatformApi for DouyinRecorder {
             }
             Err(error) => return Err(error),
         };
+        if identifier_type == "profile" && info.status != 0 {
+            self.clear_profile_web_rid().await;
+        }
         if resolved_now && info.status == 0 {
             self.set_identity_metadata("profile", Some(web_rid));
         }

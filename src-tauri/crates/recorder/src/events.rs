@@ -22,6 +22,10 @@ pub enum RecorderEvent {
         room_id: String,
         web_rid: String,
     },
+    WebRidCleared {
+        platform: PlatformType,
+        room_id: String,
+    },
     LiveStart {
         recorder: RecorderInfo,
     },
