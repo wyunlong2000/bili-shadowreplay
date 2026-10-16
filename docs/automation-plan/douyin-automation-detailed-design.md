@@ -3,10 +3,10 @@
 | 项目 | 值 |
 | --- | --- |
 | 文档编号 | `DDES-001` |
-| 编制日期 | `2026-10-14` |
-| 版本 | `0.2` |
-| 状态 | 待评审 |
-| 依据方案 | `DY-AUTO-001` v0.7、`FDES-001` v0.3 |
+| 编制日期 | `2026-10-15` |
+| 版本 | `0.7` |
+| 状态 | 开发中 |
+| 依据方案 | `DY-AUTO-001` v0.9、`FDES-001` v0.5 |
 | 实现范围 | 后台（Rust）、桌面端（Tauri + Svelte）、Web 端（headless + 同构 Svelte） |
 
 ## 1. 文档说明与范围
@@ -67,7 +67,7 @@ flowchart LR
 
 ## 3. 数据库设计
 
-### 3.1 新增迁移（`main.rs` `get_migrations()`，当前最大版本 17）
+### 3.1 新增迁移（`main.rs` `get_migrations()`）
 
 版本 18：自动化与检测状态三张表。
 
@@ -102,7 +102,7 @@ CREATE TABLE automation_candidates (
     status TEXT NOT NULL,              -- ready / clipping / clipped / failed / skipped
     clip_task_id TEXT,
     video_id INTEGER,
-    notify_status TEXT NOT NULL DEFAULT 'pending',  -- pending / sent / failed
+    notify_status TEXT NOT NULL DEFAULT 'pending',  -- pending / accepted / failed
     error_message TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -130,6 +130,36 @@ ALTER TABLE recorders ADD COLUMN web_rid TEXT;
 ```
 
 `web_rid` 语义：主页模式首次开播解析后写入；房间号模式为 NULL（房间号即 `room_id`）。
+
+版本 20：标识类型和通知任务。
+
+```sql
+ALTER TABLE recorders ADD COLUMN identifier_type TEXT NOT NULL DEFAULT 'room';
+CREATE TABLE automation_notifications (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL UNIQUE,
+    event_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending / sending / accepted / failed
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_automation_notifications_retry
+    ON automation_notifications (status, next_retry_at);
+```
+
+`identifier_type` 只允许 `profile` 和 `room`。房间号模式以 `room_id` 作为有效 `web_rid`，`web_rid` 列保持空；主页模式以 `room_id` 保存 `sec_uid`，首次开播解析后写入 `web_rid`。
+
+版本 21：保存主页模式的显示资料。
+
+```sql
+ALTER TABLE recorders ADD COLUMN profile_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE recorders ADD COLUMN profile_avatar TEXT NOT NULL DEFAULT '';
+```
+
+主页添加时通过公开用户资料接口校验 `sec_uid`，并持久化昵称与头像；恢复录制器时先展示已保存资料，不依赖首次开播检测结果。
 
 ### 3.2 启动恢复
 
@@ -173,7 +203,9 @@ pub struct DetectionState {
 
 退避延迟：`run_recording_loop` 的 `status_poll_delay(interval)` 改为 `recorder.current_poll_delay()`：
 
-- 序列 `[10, 30, 60, 120, 240, 300]` 秒（启动短序列 → 加倍 → 上限），附加随机抖动；上限取 `max(基础间隔, backoff_cap_seconds)`，且不低于基础间隔；
+- 失败序列 `[30, 60, 120, 240, 300]` 秒（基础间隔 → 加倍 → 上限）；
+- 同一应用进程内的抖音监测和房间元数据 HTTP 请求共享全局时隙，相邻请求启动间隔不低于 30 秒。HLS/FLV 取流和弹幕连接不受此控制面限流约束；
+- 上限取 `max(基础间隔, backoff_cap_seconds)`，且不低于基础间隔；
 - `backoff_level == 0` 时使用基础间隔（抖音下限 `max(interval, min_interval_seconds)`，`REQ-004`）。
 
 ### 4.2 错误分类
@@ -206,11 +238,12 @@ pub async fn check_user_live(
 ) -> UserLiveStatus;
 ```
 
-通道实现（多源三态合并）：
+通道实现（分层调用和多源三态合并）：
 
-1. **主通道** `check_user_live_by_profile_api`：`https://www.douyin.com/aweme/v1/web/user/profile/other/`，参数为 sec_user_id + webapp 常规参数，复用 `generate_a_bogus`、`generate_ms_token` 签名；解析 `user.live_status`（非 0=在播）、`user.room` / `live_room` / `room_data`（room_id / id_str、title）、`user.web_rid`、`user.room_id` / `room_id_str`。空响应 → 会话重建后重试一次。字段名在 `PH-001` 复测（`RISK-008`）。
-2. **次通道** `check_user_live_by_info_by_user`：`https://live.douyin.com/webcast/room/info_by_user/?sec_user_id=...&version_code=170400&device_platform=web`；`data` 为空对象 → 明确离线；`data.room.status == 2` → 在播并取 `id_str` / `room_id`。在播响应形态实现时复测。
-3. **合并**：任一 Live → Live（携带 web_rid）；两通道均明确 Offline → Offline；其余（冲突、超时、验证页）→ Unknown。
+1. **主通道** `check_user_live_by_profile_api`：`https://www.douyin.com/aweme/v1/web/user/profile/other/`，参数为 sec_user_id + webapp 常规参数，复用 `generate_a_bogus`、`generate_ms_token` 签名；解析 `user.live_status`（`0`=未播，非 `0`=开播）。实测开播响应的 `user.room_data` 是 JSON 字符串，优先解析其 `owner.web_rid`；离线响应可能没有 `room_data`，且 `room_id_str` 为 `0`。不得使用 `room_data.status` 替代 `live_status`。开播与未播样本来自不同主播，字段形态已确认，单主播状态迁移仍待运行时验证。空响应 → 会话重建后重试一次。
+2. **次通道** `check_user_live_by_info_by_user`：`https://live.douyin.com/webcast/room/info_by_user/?sec_user_id=...&version_code=170400&device_platform=web`；只有在真实请求样本确认响应语义后，才能把空 `data` 判为离线并解析在播房间号。两条主页样本（分别已知未播、开播）当前都返回 `{"data":{},"extra":{"now":...},"status_code":0}`，不能区分状态。
+3. **调用层级**：`web_rid` 未知时每轮调用主通道；主通道异常或达到全量巡检条件时调用次通道。`web_rid` 已知时每轮调用房间级接口；新场次开始和房间级连续失败达到 3 次时调用用户级通道刷新房间号。
+4. **合并**：主通道明确结果直接采用；主通道为 `UNKNOWN` 时采用次通道明确结果；周期巡检中两来源明确但冲突时返回 `UNKNOWN`；两来源均未知时返回 `UNKNOWN`。
 
 ttwid 会话（`REQ-015`）：
 
@@ -222,16 +255,16 @@ ttwid 会话（`REQ-015`）：
 
 ### 4.4 sec_uid 模式录制器（`douyin.rs`）
 
-`DouyinExtra` 扩展 `web_rid: Arc<RwLock<Option<String>>>`；`DouyinRecorder::new` 增加参数 `web_rid: Option<String>`：
+`DouyinRecorder::new` 接收 `identifier_type` 与可选 `web_rid`，并通过通用 `Recorder` 的身份元数据保存标识类型、房间解析状态和有效 `web_rid`：
 
-- 房间号模式：`web_rid = Some(room_id)`，行为与现状一致；
-- 主页模式：`web_rid` 取 `recorders.web_rid` 列（可能为空），为空即待解析。
+- 房间号模式：有效 `web_rid` 取 `room_id`，数据库 `web_rid` 列保持 NULL；
+- 主页模式：有效 `web_rid` 取 `recorders.web_rid` 列，可能为空；为空即待解析。
 
 `poll_room` 分支：
 
 - `web_rid` 已知 → 现有房间级路径（`get_room_info`），行为不变；
 - `web_rid` 未知 → `check_user_live(sec_uid)`：
-  - `Live` → 解析 web_rid 并写回 DB（`update_recorder_web_rid`）与 `DouyinExtra`，随后立即调用房间级 `get_room_info(web_rid)` 填充 `pending`（供 `poll_stream` 取流），返回 `RoomPoll { live: true, .. }`；
+  - `Live` → 解析 web_rid 并写回 DB（`update_recorder_web_rid`）与通用录制器身份元数据，随后立即调用房间级 `get_room_info(web_rid)` 填充 `pending`（供 `poll_stream` 取流），返回 `RoomPoll { live: true, .. }`；
   - `Offline` → `RoomPoll { live: false, .. }`（元数据用昵称等）；
   - `Unknown` → 返回分类后的 `RecorderError`（走 4.1 的 UNKNOWN 路径）。
 
@@ -241,11 +274,11 @@ ttwid 会话（`REQ-015`）：
 - 房间级路径连续失败或空响应达到 3 次 → 回退用户级重新解析；解析成功刷新 web_rid 并恢复房间级；失败按 Unknown 进入退避；
 - 刷新与回退记录日志，便于诊断。
 
-交接后（web_rid 落库）：下次启动直接走房间级路径；用户级接口仅在"首次开播前"使用（`REQ-014`）。
+交接后（web_rid 落库）：下次启动直接走房间级路径；用户级接口只在新场次校验、房间级连续失败或周期巡检时使用（`REQ-014`）。
 
 ### 4.5 RecorderInfo 扩展与可观测（`REQ-007`）
 
-`RecorderInfo` 增加字段：`detection_status`（live/offline/unknown/unconfirmed）、`detection_error_kind`、`last_checked_at`、`next_retry_at`、`consecutive_unknown`、`room_resolved`（布尔）。`info()` 从 `DetectionState` 填充；`get_recorder_list` 的仅 DB 兜底项填默认值；前端类型同步（§10.5）。
+`RecorderInfo` 增加字段：`detection_status`（live/offline/unknown/unconfirmed）、`detection_error_kind`、`last_checked_at`、`last_success_at`、`next_retry_at`、`consecutive_unknown`、`room_resolved`、`identifier_type` 和 `web_rid`。`web_rid` 是对外使用的有效房间号：房间模式取 `room_id`，主页模式取已解析并持久化的值；主页尚未解析时为 `null`。`info()` 从录制器状态填充；`get_recorder_list` 的仅 DB 兜底项按此语义组装；前端类型同步（§10.5）。
 
 ## 5. 添加流程详细设计（`REQ-013`）
 
@@ -379,7 +412,7 @@ pub struct ClipPayload {
 }
 ```
 
-`Payload::Clip(VideoRow)` 改为 `Payload::Clip(ClipPayload)`：单一变体加显式判别字段，不再依赖 `untagged` 声明顺序。普通切片（整场/手动）`kind="clip"`；候选切片 `kind="candidate"` 且携带 `candidate` 对象；事件类型仍为 `clip.generated`。调用点同步更新：`handlers/video.rs`（`clip_range` 任务）与 `recorder_manager.rs`（整场切片）填 `kind="clip"`，候选切片路径填 `kind="candidate"`。兼容性：现有订阅者按需忽略新增字段；补双向序列化测试（§13）。传输重试沿用 `WebhookPoster`（3 次）；poster 成功 → `notify_status='sent'`，重试耗尽 → `'failed'`（不阻断）。
+`Payload::Clip(VideoRow)` 改为 `Payload::Clip(ClipPayload)`：单一变体加显式判别字段，并为旧消费者保留兼容解析。普通切片（整场/手动）`kind="clip"`；候选切片 `kind="candidate"` 且携带 `candidate` 对象；事件类型仍为 `clip.generated`。调用点同步更新 `handlers/video.rs` 的生成和删除事件、`recorder_manager.rs` 的整场切片，以及候选切片路径。候选通知写入 `automation_notifications` 后异步发送；外部邮件服务返回 2xx 后标记 `notify_status='accepted'`，重试耗尽标记 `failed`，应用重启恢复 `pending/sending`（不阻断录制）。
 
 ### 7.3 参考邮件接收器（`PH-003` 验收物）
 
@@ -520,7 +553,7 @@ sequenceDiagram
 
 **录制中分析循环**：RecordStart → spawn 分析任务 → 每 tick 取已录时长 → 处理完整窗口（弹幕/字幕/评分）→ 写候选与进度 → RecordEnd 收尾段落 → LiveEnd 收尾全场（按 `parent_id` 汇总）。
 
-**直播结束 → 通知**：LiveEnd → handle_live_end（整场切片 + 候选切片入队）→ 原子认领后逐个切片（clip_range + 弹幕烧录）→ 回写 video_id → 发 `clip.generated`（`kind="candidate"`）→ 外部邮件服务按 `candidate.id` 去重发送 → 更新 notify_status。
+**直播结束 → 通知**：LiveEnd → handle_live_end（整场切片 + 候选切片入队）→ 原子认领后逐个切片（clip_range + 弹幕烧录）→ 回写 video_id → 写入 `automation_notifications` → 投递 `clip.generated`（`kind="candidate"`）→ 外部邮件服务按 `candidate.id` 去重接收 → 更新 `notify_status`。
 
 ## 12. 幂等与恢复汇总
 
@@ -530,7 +563,7 @@ sequenceDiagram
 | 分析进度 | `(platform, room_id, live_id)` | 启动时 running → interrupted；按 `processed_until_ms` 续跑 |
 | 候选 | `(platform, room_id, parent_id, start_ms, end_ms)` 唯一键 | 冲突不重复插入 |
 | 切片任务 | 候选 `status` 原子认领（`UPDATE … WHERE status='ready'`）+ `video_id` | 启动时 clipping → ready；认领失败即跳过 |
-| 通知 | 候选 `id`（uuid）+ `notify_status` | 邮件服务按 id 去重；重试不重复生成切片 |
+| 通知 | `automation_notifications.candidate_id` 唯一键 + `notify_status` | 重启恢复 pending/sending；邮件服务按 id 去重；重试不重复生成切片 |
 | 检测状态 | `detection_states`（platform, room_id） | 启动恢复全部字段并按 `next_retry_at` 继续；用户重新启用强制复位 |
 | 通用任务 | `tasks` 表 | 沿用 `finish_pending_tasks` |
 
@@ -540,12 +573,12 @@ sequenceDiagram
 
 **`PH-001` 接口复测清单（实现第一步执行，`RISK-008`）**：
 
-- aweme 用户接口字段（`user.live_status`、`user.room`、`user.web_rid`）在真实账号 + 在播样本下的响应形态；
-- `info_by_user` 在播响应形态（当前只有离线样本）；
+- aweme 用户接口字段（`user.live_status`、`user.room`、`user.web_rid`）在已知开播和未播样本下的响应形态；
+- `info_by_user` 在播和未播响应形态；两个公开样本目前均返回空 `data`，不能当作离线证据；
 - ttwid 获取与空响应重建路径；
 - 验证页特征串命中测试。
 
-**单元测试清单**：各输入形态的 URL 归一；窗口映射（边界、末段排除、safety margin、段内相对时间轴）；状态机 8 条转换 + UNKNOWN/退避/熔断；候选合并与唯一键去重；并发原子认领（两任务同时认领仅一个成功）；`ClipPayload` 两种 `kind` 的序列化/反序列化兼容（含旧字段视图）；检测状态持久化与重启恢复（熔断不被重启绕过）；web_rid 校验与刷新路径（模拟房间级失败回退）；退避序列 `[10,30,60,120,240,300]`。
+**单元测试清单**：各输入形态的 URL 归一；窗口映射（边界、末段排除、safety margin、段内相对时间轴）；状态机 8 条转换 + UNKNOWN/退避/熔断；候选合并与唯一键去重；并发原子认领（两任务同时认领仅一个成功）；`ClipPayload` 两种 `kind` 的序列化/反序列化兼容（含旧字段视图）；检测状态持久化与重启恢复（熔断不被重启绕过）；web_rid 校验与刷新路径（模拟房间级失败回退）；退避序列 `[30,60,120,240,300]`。
 
 **集成验证**：回放已录直播检查分析漏选/误选/重复（`PH-002`）；双端（桌面 + Docker Web）全流程（`PH-003`）。
 
@@ -562,7 +595,7 @@ sequenceDiagram
 
 ## 15. 开放项与风险
 
-- 用户级接口字段与在播响应形态必须在 `W1` 复测（`RISK-008`）；`info_by_user` 在播形态无样本，若复测失败由主通道 + 房间级兜底承接。
+- 用户级主接口已由开播与未播样本确认 `live_status` 及 `room_data.owner.web_rid` 形态；样本来自不同主播，仍需运行时验证状态迁移。`info_by_user` 备用通道响应语义未确认，空 `data` 不能作为离线证据（`RISK-008`）。
 - 全量巡检参数为参考实现经验值（`RVW-009` 评审确认）；基础间隔、退避上限与熔断恢复已按 `RVW-001`/`RVW-002`/`RVW-005` 收敛。
 - PowerLive 字幕后端密钥硬编码（`BASE-010`），依赖该后端前需配置化。
 - 分析的字幕/抽帧成本上限并入 `RISK-005`，详设参数可调。
@@ -574,3 +607,8 @@ sequenceDiagram
 | --- | --- | --- |
 | `0.1` | `2026-10-14` | 依据 `DY-AUTO-001` v0.6、`FDES-001` v0.3 编制：监测层、添加流程、分析引擎、切片通知、配置、接口、前端（桌面/Web）、验证与实施顺序。 |
 | `0.2` | `2026-10-14` | 按评审意见修订：明确分析以录制段为粒度与 `LiveEnd` 汇总收尾；`web_rid` 校验与刷新；`room_id`/`web_rid` 语义与消费点审计；切片原子认领；`ClipPayload` 显式判别；检测状态持久化（`detection_states`）；参数收敛同步。 |
+| `0.3` | `2026-10-15` | 根据开发准入确认采用分层监测、增加 `identifier_type` 和持久化通知任务，明确通知状态为外部服务已接收或提交。 |
+| `0.4` | `2026-10-15` | 确认抖音退避序列最低为 30 秒，并同步监测参数。 |
+| `0.5` | `2026-10-15` | 确认全局监测请求间隔，补充有效 `web_rid` 返回语义，并记录用户主页样本的接口观察结果。 |
+| `0.6` | `2026-10-15` | 补充主页添加的公开资料校验、主播昵称/头像持久化及数据库迁移 21。 |
+| `0.7` | `2026-10-15` | 根据开播与未播样本明确 `live_status` 语义、`room_data` 字符串解析及 `owner.web_rid` 优先级。 |
