@@ -171,6 +171,23 @@ fn ensure_database_access(app_config_dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(feature = "gui")]
+/// 在桌面数据库插件启动前处理旧版自动化迁移记录。
+fn prepare_gui_migration_history(config_dir: &Path) -> Result<(), sqlx::Error> {
+    tauri::async_runtime::block_on(async {
+        let pool = sqlx::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(config_dir.join("data_v2.db")),
+            )
+            .await?;
+        let result = reconcile_legacy_automation_migrations(&pool).await;
+        pool.close().await;
+        result.map(|_| ())
+    })
+}
+
+#[cfg(feature = "gui")]
 fn app_config_dir(identifier: &str) -> io::Result<PathBuf> {
     platform_dirs::AppDirs::new(Some(identifier), false)
         .map(|dirs| dirs.config_dir)
@@ -586,7 +603,179 @@ fn get_migrations() -> Vec<Migration> {
             sql: "ALTER TABLE uploads ADD COLUMN danmu INTEGER NOT NULL DEFAULT 0;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 22,
+            description: "add_automation_tables",
+            sql: r#"
+                CREATE TABLE IF NOT EXISTS automation_analysis (
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    processed_until_ms INTEGER NOT NULL DEFAULT 0,
+                    window_seconds INTEGER NOT NULL,
+                    subtitle_json TEXT,
+                    task_id TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, room_id, live_id)
+                );
+                CREATE TABLE IF NOT EXISTS automation_candidates (
+                    id TEXT PRIMARY KEY,
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    clip_task_id TEXT,
+                    video_id INTEGER,
+                    notify_status TEXT NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (platform, room_id, parent_id, start_ms, end_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_candidates_parent
+                    ON automation_candidates (room_id, parent_id);
+                CREATE TABLE IF NOT EXISTS detection_states (
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    confirmed INTEGER,
+                    last_checked_at INTEGER NOT NULL DEFAULT 0,
+                    last_success_at INTEGER NOT NULL DEFAULT 0,
+                    error_kind TEXT NOT NULL DEFAULT '',
+                    consecutive_unknown INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER NOT NULL DEFAULT 0,
+                    backoff_level INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, room_id)
+                );
+                CREATE TABLE IF NOT EXISTS automation_notifications (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL UNIQUE,
+                    event_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_automation_notifications_retry
+                    ON automation_notifications (status, next_retry_at);
+            "#,
+            kind: MigrationKind::Up,
+        },
     ]
+}
+
+/// 清除自动化分支占用的冲突迁移记录，保留其数据表并允许合并后的迁移补齐主线结构。
+async fn reconcile_legacy_automation_migrations(
+    pool: &sqlx::SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    use sqlx::Row;
+
+    let migration_table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !migration_table_exists {
+        return Ok(false);
+    }
+
+    let rows = sqlx::query(
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version BETWEEN 18 AND 21 ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
+    let applied = rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<i64, _>("version")?,
+                row.try_get::<String, _>("description")?,
+                row.try_get::<bool, _>("success")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let legacy_migrations = [
+        (18, "add_automation_tables"),
+        (19, "add_recorder_web_rid"),
+        (20, "add_recorder_identifier_and_notification_tasks"),
+        (21, "add_douyin_profile_display_fields"),
+    ];
+
+    if applied.is_empty()
+        || applied.len() > legacy_migrations.len()
+        || applied
+            .iter()
+            .zip(legacy_migrations.iter())
+            .any(|((version, description, _), expected)| {
+                *version != expected.0 || description != expected.1
+            })
+        || applied
+            .iter()
+            .enumerate()
+            .any(|(index, (_, _, success))| !success && index + 1 != applied.len())
+    {
+        return Ok(false);
+    }
+
+    let has_later_migration: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version > 21)",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_later_migration {
+        return Ok(false);
+    }
+
+    let last_legacy_version = applied.last().map(|(version, _, _)| *version).unwrap_or(17);
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version BETWEEN 18 AND ?")
+        .bind(last_legacy_version)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    log::warn!("检测到自动化分支的旧迁移记录，已保留主播监测数据并切换到合并后的数据库迁移。");
+    Ok(true)
+}
+
+/// 确保主播主页监测所需的标识列存在。
+async fn ensure_recorder_identity_columns(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    use sqlx::Row;
+
+    let rows = sqlx::query("PRAGMA table_info(recorders)")
+        .fetch_all(pool)
+        .await?;
+    let columns = rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    for (column, definition) in [
+        ("web_rid", "TEXT"),
+        ("identifier_type", "TEXT NOT NULL DEFAULT 'room'"),
+        ("profile_name", "TEXT NOT NULL DEFAULT ''"),
+        ("profile_avatar", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !columns.iter().any(|existing| existing == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE recorders ADD COLUMN {column} {definition}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "headless")]
@@ -652,10 +841,12 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
         Sqlite::create_database(&conn_url).await?;
     }
     let db_pool: Pool<Sqlite> = Pool::connect(&conn_url).await?;
+    reconcile_legacy_automation_migrations(&db_pool).await?;
     let migrations = get_migrations();
 
     let migrator = Migrator::new(MigrationList(migrations)).await?;
     migrator.run(&db_pool).await?;
+    ensure_recorder_identity_columns(&db_pool).await?;
 
     let credentials = CredentialCipher::load(&db_pool).await?;
     let events = EventBus::new();
@@ -743,6 +934,7 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
         .get("sqlite:data_v2.db")
         .ok_or("sqlite:data_v2.db is not registered")?;
     let tauri_plugin_sql::DbPool::Sqlite(sqlite_pool) = dbpool;
+    ensure_recorder_identity_columns(sqlite_pool).await?;
     let credentials = match CredentialCipher::load(sqlite_pool).await {
         Ok(credentials) => credentials,
         Err(error)
@@ -1086,6 +1278,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = tauri::generate_context!();
     let database_access_error = match app_config_dir(&context.config().identifier) {
         Ok(config_dir) => ensure_database_access(&config_dir)
+            .and_then(|()| {
+                prepare_gui_migration_history(&config_dir)
+                    .map_err(io::Error::other)
+            })
             .err()
             .map(|error| (Some(config_dir), error)),
         Err(error) => Some((None, error)),
@@ -1095,7 +1291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .map_or_else(|| "无法确定".to_string(), |path| path.display().to_string());
         let message = format!(
-            "应用无法访问数据目录，因此不能启动。\n\n数据目录：{}\n系统错误：{}\n\n请检查该目录及 data_v2.db 的读写权限，然后重新启动应用。",
+            "应用无法访问或准备数据目录，因此不能启动。\n\n数据目录：{}\n系统错误：{}\n\n请检查该目录及 data_v2.db 的读写权限，然后重新启动应用。",
             path, error
         );
         sentry::capture_message(&message, sentry::Level::Error);
