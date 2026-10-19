@@ -63,7 +63,12 @@ async function invoke<T>(
     }
 
     if (command === "open_clip") {
-      window.open(`index_clip.html?id=${args.videoId}`, "_blank");
+      window.open(`index_clip.html?material=${args.videoId}`, "_blank");
+      return;
+    }
+
+    if (command === "open_project") {
+      window.open(`index_clip.html?project=${args.projectId}`, "_blank");
       return;
     }
 
@@ -121,7 +126,8 @@ async function get(url: string) {
 
 async function set_title(title: string) {
   if (TAURI_ENV) {
-    return await getCurrentWebviewWindow().setTitle(title);
+    // Not `setTitle()`: on macOS that resets the traffic light position.
+    return await invoke("set_window_title", { title });
   }
 
   document.title = title;

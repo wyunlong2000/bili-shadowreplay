@@ -12,9 +12,12 @@ mod ffmpeg;
 mod handlers;
 #[cfg(feature = "headless")]
 mod http_server;
+mod material;
 mod mcp;
 mod migration;
+mod powerlive;
 mod progress;
+mod project;
 mod recorder_manager;
 mod state;
 #[cfg(feature = "gui")]
@@ -509,97 +512,78 @@ fn get_migrations() -> Vec<Migration> {
         },
         Migration {
             version: 18,
-            description: "add_automation_tables",
-            sql: r#"
-                CREATE TABLE automation_analysis (
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    live_id TEXT NOT NULL,
-                    parent_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    processed_until_ms INTEGER NOT NULL DEFAULT 0,
-                    window_seconds INTEGER NOT NULL,
-                    subtitle_json TEXT,
-                    task_id TEXT,
-                    error_message TEXT,
+            description: "add_materials_and_projects",
+            // Existing videos become materials. `needs_project` marks the rows
+            // that get a single-material project at startup, which also needs
+            // their subtitle files and therefore cannot happen in SQL.
+            sql: r"
+                ALTER TABLE videos ADD COLUMN live_id TEXT NOT NULL DEFAULT '';
+                ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT '';
+                ALTER TABLE videos ADD COLUMN duration REAL NOT NULL DEFAULT 0;
+                ALTER TABLE videos ADD COLUMN needs_project INTEGER NOT NULL DEFAULT 0;
+                UPDATE videos SET needs_project = 1;
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_id TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    cover TEXT NOT NULL DEFAULT '',
+                    timeline TEXT NOT NULL DEFAULT '',
+                    profile TEXT NOT NULL DEFAULT '',
+                    output TEXT NOT NULL DEFAULT '',
+                    output_hash TEXT NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    bvid TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (platform, room_id, live_id)
+                    updated_at TEXT NOT NULL
                 );
-                CREATE TABLE automation_candidates (
-                    id TEXT PRIMARY KEY,
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    parent_id TEXT NOT NULL,
-                    live_id TEXT NOT NULL,
-                    start_ms INTEGER NOT NULL,
-                    end_ms INTEGER NOT NULL,
-                    score REAL NOT NULL,
-                    signals_json TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    clip_task_id TEXT,
-                    video_id INTEGER,
-                    notify_status TEXT NOT NULL DEFAULT 'pending',
-                    error_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (platform, room_id, parent_id, start_ms, end_ms)
-                );
-                CREATE INDEX idx_candidates_parent
-                    ON automation_candidates (room_id, parent_id);
-                CREATE TABLE detection_states (
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    confirmed INTEGER,
-                    last_checked_at INTEGER NOT NULL DEFAULT 0,
-                    last_success_at INTEGER NOT NULL DEFAULT 0,
-                    error_kind TEXT NOT NULL DEFAULT '',
-                    consecutive_unknown INTEGER NOT NULL DEFAULT 0,
-                    next_retry_at INTEGER NOT NULL DEFAULT 0,
-                    backoff_level INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (platform, room_id)
-                );
-            "#,
+                CREATE INDEX idx_projects_room_id ON projects(room_id);
+            ",
             kind: MigrationKind::Up,
         },
         Migration {
             version: 19,
-            description: "add_recorder_web_rid",
-            sql: "ALTER TABLE recorders ADD COLUMN web_rid TEXT;",
+            description: "add_uploads",
+            // Projects posted before uploads existed keep their history. Legacy
+            // projects created at startup add their own records.
+            sql: r"
+                CREATE TABLE uploads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL DEFAULT 'file',
+                    source_id INTEGER NOT NULL DEFAULT 0,
+                    file TEXT NOT NULL DEFAULT '',
+                    room_id TEXT NOT NULL DEFAULT '',
+                    uid TEXT NOT NULL DEFAULT '',
+                    cover TEXT NOT NULL DEFAULT '',
+                    profile TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    message TEXT NOT NULL DEFAULT '',
+                    bvid TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO uploads (source, source_id, room_id, profile, status, bvid, created_at, updated_at)
+                    SELECT 'project', id, room_id, profile, 'posted', bvid, updated_at, updated_at
+                    FROM projects WHERE bvid != '';
+            ",
             kind: MigrationKind::Up,
         },
         Migration {
             version: 20,
-            description: "add_recorder_identifier_and_notification_tasks",
-            sql: r#"
-                ALTER TABLE recorders
-                    ADD COLUMN identifier_type TEXT NOT NULL DEFAULT 'room';
-                CREATE TABLE automation_notifications (
-                    id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL UNIQUE,
-                    event_json TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_retry_at INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX idx_automation_notifications_retry
-                    ON automation_notifications (status, next_retry_at);
-            "#,
+            description: "drop_project_exports",
+            // Exports are written to a file the user picks and uploads render
+            // their own video, so projects no longer track an export.
+            sql: r"
+                ALTER TABLE projects DROP COLUMN output;
+                ALTER TABLE projects DROP COLUMN output_hash;
+            ",
             kind: MigrationKind::Up,
         },
         Migration {
             version: 21,
-            description: "add_douyin_profile_display_fields",
-            sql: r#"
-                ALTER TABLE recorders ADD COLUMN profile_name TEXT NOT NULL DEFAULT '';
-                ALTER TABLE recorders ADD COLUMN profile_avatar TEXT NOT NULL DEFAULT '';
-            "#,
+            description: "add_upload_danmu",
+            sql: "ALTER TABLE uploads ADD COLUMN danmu INTEGER NOT NULL DEFAULT 0;",
             kind: MigrationKind::Up,
         },
     ]
@@ -678,6 +662,7 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
     let db = Arc::new(Database::new(db_pool, credentials, events.clone()));
     db.migrate_account_credentials().await?;
     db.finish_pending_tasks().await?;
+    db.fail_interrupted_uploads().await?;
     db.finish_pending_record_summaries().await?;
 
     let webhook_poster =
@@ -700,6 +685,10 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
     let _ = try_convert_clip_covers(&db, config.read().await.output.clone().into()).await;
     let _ = try_add_parent_id_to_records(&db).await;
     let _ = try_convert_entry_to_m3u8(&db, config.read().await.cache.clone().into()).await;
+    tokio::spawn(crate::handlers::project::create_legacy_projects(
+        db.clone(),
+        config.read().await.output.clone().into(),
+    ));
 
     Ok(State {
         mcp_server: Arc::new(mcp::McpServer::default()),
@@ -800,6 +789,7 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
     ));
     db.migrate_account_credentials().await?;
     db.finish_pending_tasks().await?;
+    db.fail_interrupted_uploads().await?;
     db.finish_pending_record_summaries().await?;
     let webhook_poster =
         webhook::poster::create_webhook_poster(&config.read().await.webhook_url, None)
@@ -831,6 +821,10 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
     let _ = try_convert_clip_covers(&db, output_path.clone().into()).await;
     let _ = try_add_parent_id_to_records(&db).await;
     let _ = try_convert_entry_to_m3u8(&db, cache_path.clone().into()).await;
+    tauri::async_runtime::spawn(crate::handlers::project::create_legacy_projects(
+        db.clone(),
+        output_path.clone().into(),
+    ));
 
     Ok(Some(State {
         mcp_server: Arc::new(mcp::McpServer::default()),
@@ -957,7 +951,11 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::config::update_whisper_language,
         crate::handlers::config::update_webhook_url,
         crate::handlers::config::update_danmu_ass_options,
-        crate::handlers::config::update_powerlive_key,
+        crate::powerlive::get_powerlive_status,
+        crate::powerlive::get_powerlive_account,
+        crate::powerlive::begin_powerlive_login,
+        crate::powerlive::cancel_powerlive_login,
+        crate::powerlive::logout_powerlive,
         crate::handlers::config::update_llm_config,
         crate::handlers::message::get_messages,
         crate::handlers::message::read_message,
@@ -1002,6 +1000,8 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::video::update_video_subtitle,
         crate::handlers::video::update_video_note,
         crate::handlers::video::encode_video_subtitle,
+        crate::handlers::subtitle_fonts::get_subtitle_preview_fonts,
+        crate::handlers::subtitle_fonts::get_subtitle_font_families,
         crate::handlers::video::generic_ffmpeg_command,
         crate::handlers::video::import_external_video,
         crate::handlers::video::batch_import_external_videos,
@@ -1009,6 +1009,27 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::video::get_file_size,
         crate::handlers::video::get_import_progress,
         crate::handlers::video::generate_audio_sample,
+        crate::handlers::project::get_projects,
+        crate::handlers::project::get_project,
+        crate::handlers::project::create_project,
+        crate::handlers::project::update_project_info,
+        crate::handlers::project::update_project_timeline,
+        crate::handlers::project::update_project_danmu,
+        crate::handlers::project::delete_project,
+        crate::handlers::project::export_project,
+        crate::handlers::project::get_material_usage,
+        crate::handlers::project::get_material_peaks,
+        crate::handlers::project::get_material_danmu,
+        crate::handlers::project::generate_materials,
+        crate::handlers::upload::get_uploads,
+        crate::handlers::upload::get_upload,
+        crate::handlers::upload::create_upload,
+        crate::handlers::upload::update_upload,
+        crate::handlers::upload::update_upload_cover,
+        crate::handlers::upload::update_upload_danmu,
+        crate::handlers::upload::delete_upload,
+        crate::handlers::upload::post_upload,
+        crate::handlers::upload::request_upload,
         crate::handlers::task::get_tasks,
         crate::handlers::task::delete_task,
         crate::handlers::utils::show_in_folder,
@@ -1016,6 +1037,8 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::utils::get_disk_info,
         crate::handlers::utils::open_live,
         crate::handlers::utils::open_clip,
+        crate::handlers::utils::open_project,
+        crate::handlers::utils::set_window_title,
         crate::handlers::utils::open_log_folder,
         crate::handlers::utils::file_exists,
         crate::handlers::utils::console_log,

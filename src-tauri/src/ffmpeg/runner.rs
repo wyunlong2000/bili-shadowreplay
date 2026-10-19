@@ -7,6 +7,7 @@
 //! desired, a [`ProgressReporterTrait`] implementation.
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io,
     path::PathBuf,
@@ -14,16 +15,19 @@ use std::{
     process::Stdio,
 };
 
-use async_ffmpeg_sidecar::{event::FfmpegEvent, log_parser::FfmpegLogParser};
+use async_ffmpeg_sidecar::{
+    event::FfmpegEvent,
+    log_parser::{parse_time_str, FfmpegLogParser},
+};
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{io::BufReader, process::Command};
 
-use crate::progress::progress_reporter::ProgressReporterTrait;
+use crate::progress::progress_reporter::{ProgressReporterTrait, StageProgress};
 use ffmpeg_utils::ffmpeg_command;
 
 /// How a job turns parsed ffmpeg events into progress updates.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ProgressMode {
     /// Do not call the reporter and do not add ffmpeg's `-progress` option.
     #[default]
@@ -34,27 +38,28 @@ pub enum ProgressMode {
     /// `-progress pipe:2`, so that value is used when no summary progress event
     /// is available.
     Time,
-    /// Report `<prefix><timestamp><suffix>`, which keeps each job's existing
-    /// user-visible wording ("压制中：…", "切片进度: …").
-    Labeled { prefix: String, suffix: String },
-    /// Report the raw microsecond value from an `out_time_ms=` log event.
-    OutTimeMs,
+    /// Report [`StageProgress`] under a user-facing stage name such as "压制弹幕".
+    Stage { name: String, total: ProgressTotal },
+}
+
+/// Where a stage's total media duration comes from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProgressTotal {
+    /// The first input's duration: single-video jobs, and overlays whose extra
+    /// inputs are still images.
+    FirstInput,
+    /// The sum of all input durations, as in hard-cut concatenation.
+    AllInputs,
+    /// A duration the caller already knows, such as a trim length.
+    Known(f64),
 }
 
 impl ProgressMode {
-    /// Report `<prefix><timestamp>`.
-    pub fn prefixed(prefix: impl Into<String>) -> Self {
-        Self::Labeled {
-            prefix: prefix.into(),
-            suffix: String::new(),
-        }
-    }
-
-    /// Report `<prefix><timestamp><suffix>`.
-    pub fn labeled(prefix: impl Into<String>, suffix: impl Into<String>) -> Self {
-        Self::Labeled {
-            prefix: prefix.into(),
-            suffix: suffix.into(),
+    /// Report measurable progress under `name`.
+    pub fn stage(name: impl Into<String>, total: ProgressTotal) -> Self {
+        Self::Stage {
+            name: name.into(),
+            total,
         }
     }
 
@@ -72,23 +77,79 @@ impl ProgressMode {
             _ => None,
         }
     }
+}
 
-    fn message_for(&self, event: &FfmpegEvent) -> Option<String> {
-        match self {
-            Self::None => None,
-            Self::Time => Self::progress_time(event).map(ToOwned::to_owned),
-            Self::Labeled { prefix, suffix } => {
-                Self::progress_time(event).map(|time| format!("{prefix}{time}{suffix}"))
+enum ProgressReport {
+    Text(String),
+    Stage(StageProgress),
+}
+
+/// Follows one job's ffmpeg events and turns them into progress reports.
+#[derive(Default)]
+struct ProgressTracker {
+    input_durations: BTreeMap<u32, f64>,
+    speed: Option<f64>,
+    last_processed: Option<f64>,
+}
+
+impl ProgressTracker {
+    fn observe(&mut self, mode: &ProgressMode, event: &FfmpegEvent) -> Option<ProgressReport> {
+        let (name, total) = match mode {
+            ProgressMode::None => return None,
+            ProgressMode::Time => {
+                return ProgressMode::progress_time(event)
+                    .map(|time| ProgressReport::Text(time.to_owned()));
             }
-            Self::OutTimeMs => match event {
-                FfmpegEvent::Log(_, content) => content
-                    .strip_prefix("out_time_ms=")
-                    .map(str::trim)
-                    .filter(|content| !content.is_empty())
-                    .map(ToOwned::to_owned),
-                _ => None,
-            },
+            ProgressMode::Stage { name, total } => (name, *total),
+        };
+
+        match event {
+            FfmpegEvent::ParsedDuration(duration) => {
+                self.input_durations
+                    .insert(duration.input_index, duration.duration);
+            }
+            FfmpegEvent::Progress(progress) if progress.speed > 0.0 => {
+                self.speed = Some(f64::from(progress.speed));
+            }
+            FfmpegEvent::Log(_, content) => {
+                if let Some(speed) = content
+                    .strip_prefix("speed=")
+                    .and_then(|speed| speed.trim().trim_end_matches('x').parse::<f64>().ok())
+                    .filter(|speed| *speed > 0.0)
+                {
+                    self.speed = Some(speed);
+                }
+            }
+            _ => {}
         }
+
+        // Negative before the first output frame, e.g. "-577014:32:22.77".
+        let processed = ProgressMode::progress_time(event)
+            .and_then(parse_time_str)?
+            .max(0.0);
+        // The stats line and the -progress block repeat the same position.
+        if self.last_processed == Some(processed) {
+            return None;
+        }
+        self.last_processed = Some(processed);
+
+        Some(ProgressReport::Stage(StageProgress {
+            stage: name.clone(),
+            processed,
+            total: self.total(total),
+            speed: self.speed,
+        }))
+    }
+
+    fn total(&self, total: ProgressTotal) -> Option<f64> {
+        match total {
+            ProgressTotal::FirstInput => self.input_durations.get(&0).copied(),
+            ProgressTotal::AllInputs => {
+                (!self.input_durations.is_empty()).then(|| self.input_durations.values().sum())
+            }
+            ProgressTotal::Known(total) => Some(total),
+        }
+        .filter(|total| *total > 0.0)
     }
 }
 
@@ -100,7 +161,7 @@ impl ProgressMode {
 /// "arguments plus one output file" case from being repeated at every call
 /// site.  If a caller needs a different ffmpeg argument layout, it can leave
 /// `output` unset and put every argument in `args` directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FfmpegJob {
     pub args: Vec<OsString>,
     pub output: Option<PathBuf>,
@@ -244,6 +305,7 @@ impl FfmpegJob {
                 context: context.clone(),
             })?;
         let mut parser = FfmpegLogParser::new(BufReader::new(stderr));
+        let mut tracker = ProgressTracker::default();
         let mut logs = Vec::new();
 
         loop {
@@ -266,10 +328,14 @@ impl FfmpegJob {
                     if let FfmpegEvent::Log(_, content) = &event {
                         logs.push(content.clone());
                     }
-                    if let (Some(reporter), Some(message)) =
-                        (reporter, self.progress.message_for(&event))
-                    {
-                        reporter.update(&message).await;
+                    if let Some(reporter) = reporter {
+                        match tracker.observe(&self.progress, &event) {
+                            Some(ProgressReport::Text(message)) => reporter.update(&message).await,
+                            Some(ProgressReport::Stage(progress)) => {
+                                reporter.progress(progress).await
+                            }
+                            None => {}
+                        }
                     }
                 }
             }
@@ -280,7 +346,11 @@ impl FfmpegJob {
             source,
         })?;
         if !status.success() {
-            return Err(FfmpegError::NonZeroExit { context, status });
+            return Err(FfmpegError::NonZeroExit {
+                context,
+                status,
+                detail: failure_detail(&logs),
+            });
         }
 
         Ok(JobOutput {
@@ -289,6 +359,30 @@ impl FfmpegJob {
             logs,
         })
     }
+}
+
+/// The last lines ffmpeg wrote before failing, as "：line / line", or "".
+/// `-progress` key/value lines and the stats line say nothing about the cause.
+fn failure_detail(logs: &[String]) -> String {
+    let is_progress = |line: &str| {
+        line.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) || line.starts_with("frame=")
+            || line.starts_with("size=")
+    };
+    let mut lines: Vec<&str> = logs
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !is_progress(line))
+        .take(2)
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.reverse();
+    let detail: String = lines.join(" / ").chars().take(300).collect();
+    format!("：{detail}")
 }
 
 /// Run a command that has already been assembled by a feature-specific module.
@@ -338,8 +432,13 @@ pub enum FfmpegError {
         #[source]
         source: io::Error,
     },
-    #[error("{context}: ffmpeg 异常退出（{status}）")]
-    NonZeroExit { context: String, status: ExitStatus },
+    #[error("{context}: ffmpeg 异常退出（{status}）{detail}")]
+    NonZeroExit {
+        context: String,
+        status: ExitStatus,
+        /// The last lines ffmpeg logged, which usually name the cause.
+        detail: String,
+    },
 }
 
 /// The successful result of an ffmpeg job.
@@ -363,17 +462,28 @@ pub struct JobOutput {
 #[derive(Debug)]
 pub struct TempArtifact {
     path: PathBuf,
+    keep: bool,
 }
 
 impl TempArtifact {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            keep: false,
+        }
+    }
+
+    /// Preserve a completed output; failed or cancelled jobs keep the guard armed.
+    pub fn keep(mut self) {
+        self.keep = true;
     }
 }
 
 impl Drop for TempArtifact {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -392,7 +502,7 @@ impl ProgressReporterTrait for NoopReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_ffmpeg_sidecar::event::{FfmpegProgress, LogLevel};
+    use async_ffmpeg_sidecar::event::{FfmpegDuration, FfmpegProgress, LogLevel};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -423,36 +533,117 @@ mod tests {
         })
     }
 
-    #[test]
-    fn progress_modes_have_distinct_basic_behavior() {
-        let progress = sample_progress_event();
-        assert_eq!(ProgressMode::None.message_for(&progress), None);
-        assert_eq!(
-            ProgressMode::Time.message_for(&progress),
-            Some("00:00:01.00".to_owned())
-        );
+    fn observe_all(mode: &ProgressMode, events: &[FfmpegEvent]) -> Vec<ProgressReport> {
+        let mut tracker = ProgressTracker::default();
+        events
+            .iter()
+            .filter_map(|event| tracker.observe(mode, event))
+            .collect()
+    }
 
-        let out_time = FfmpegEvent::Log(LogLevel::Info, "out_time_ms=1000000".to_owned());
-        assert_eq!(ProgressMode::None.message_for(&out_time), None);
+    fn duration_event(input_index: u32, duration: f64) -> FfmpegEvent {
+        FfmpegEvent::ParsedDuration(FfmpegDuration {
+            input_index,
+            duration,
+            raw_log_message: String::new(),
+        })
+    }
+
+    fn stage_reports(reports: Vec<ProgressReport>) -> Vec<StageProgress> {
+        reports
+            .into_iter()
+            .map(|report| match report {
+                ProgressReport::Stage(progress) => progress,
+                ProgressReport::Text(text) => panic!("expected stage progress, got {text:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn time_mode_reports_raw_timestamps() {
+        let progress = sample_progress_event();
+        assert!(observe_all(&ProgressMode::None, std::slice::from_ref(&progress)).is_empty());
+        let out_time = FfmpegEvent::Log(LogLevel::Info, "out_time=00:00:01.00".to_owned());
+        let reports = observe_all(&ProgressMode::Time, &[progress, out_time]);
+        let texts: Vec<_> = reports
+            .into_iter()
+            .map(|report| match report {
+                ProgressReport::Text(text) => text,
+                ProgressReport::Stage(progress) => panic!("unexpected {progress:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["00:00:01.00", "00:00:01.00"]);
+    }
+
+    #[test]
+    fn stage_mode_measures_against_the_first_input() {
+        let mode = ProgressMode::stage("压制弹幕", ProgressTotal::FirstInput);
+        let reports = stage_reports(observe_all(
+            &mode,
+            &[
+                duration_event(0, 4.0),
+                // A still-image overlay input must not change the total.
+                duration_event(1, 0.04),
+                sample_progress_event(),
+                // The -progress block repeats the stats line position.
+                FfmpegEvent::Log(LogLevel::Info, "out_time=00:00:01.000000".to_owned()),
+                FfmpegEvent::Log(LogLevel::Info, "speed=2.5x".to_owned()),
+                FfmpegEvent::Log(LogLevel::Info, "out_time=00:00:03.000000".to_owned()),
+            ],
+        ));
         assert_eq!(
-            ProgressMode::OutTimeMs.message_for(&out_time),
-            Some("1000000".to_owned())
+            reports,
+            [
+                StageProgress {
+                    stage: "压制弹幕".into(),
+                    processed: 1.0,
+                    total: Some(4.0),
+                    speed: Some(1.0),
+                },
+                StageProgress {
+                    stage: "压制弹幕".into(),
+                    processed: 3.0,
+                    total: Some(4.0),
+                    speed: Some(2.5),
+                },
+            ]
         );
-        assert_eq!(
-            ProgressMode::Time.message_for(&FfmpegEvent::Log(
+    }
+
+    #[test]
+    fn stage_mode_totals_can_sum_inputs_or_be_known() {
+        let events = [
+            duration_event(0, 4.0),
+            duration_event(1, 6.0),
+            sample_progress_event(),
+        ];
+        let summed = stage_reports(observe_all(
+            &ProgressMode::stage("合并视频", ProgressTotal::AllInputs),
+            &events,
+        ));
+        assert_eq!(summed[0].total, Some(10.0));
+        let known = stage_reports(observe_all(
+            &ProgressMode::stage("裁剪", ProgressTotal::Known(2.0)),
+            &events,
+        ));
+        assert_eq!(known[0].total, Some(2.0));
+        let unknown = stage_reports(observe_all(
+            &ProgressMode::stage("合并视频", ProgressTotal::FirstInput),
+            &[sample_progress_event()],
+        ));
+        assert_eq!(unknown[0].total, None);
+    }
+
+    #[test]
+    fn stage_mode_clamps_negative_start_times() {
+        let reports = stage_reports(observe_all(
+            &ProgressMode::stage("压制弹幕", ProgressTotal::FirstInput),
+            &[FfmpegEvent::Log(
                 LogLevel::Info,
-                "out_time=00:00:01.00".to_owned(),
-            )),
-            Some("00:00:01.00".to_owned())
-        );
-        assert_eq!(
-            ProgressMode::prefixed("压制中：").message_for(&progress),
-            Some("压制中：00:00:01.00".to_owned())
-        );
-        assert_eq!(
-            ProgressMode::labeled("正在转换视频格式... ", " (无损转换)").message_for(&progress),
-            Some("正在转换视频格式... 00:00:01.00 (无损转换)".to_owned())
-        );
+                "out_time=-577014:32:22.771233".to_owned(),
+            )],
+        ));
+        assert_eq!(reports[0].processed, 0.0);
     }
 
     #[tokio::test]
@@ -463,12 +654,31 @@ mod tests {
             .await;
 
         match result {
-            Err(FfmpegError::NonZeroExit { context, status }) => {
+            Err(FfmpegError::NonZeroExit {
+                context, status, ..
+            }) => {
                 assert_eq!(context, "non-zero test");
                 assert!(!status.success());
             }
             other => panic!("expected non-zero exit error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn failure_detail_names_the_last_logged_problem() {
+        let logs = [
+            "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':",
+            "[AVFilterGraph @ 0x1] No such filter: 'ass'",
+            "Error opening output files: Filter not found",
+            "out_time=00:00:00.000000",
+            "progress=end",
+        ]
+        .map(String::from);
+        assert_eq!(
+            failure_detail(&logs),
+            "：[AVFilterGraph @ 0x1] No such filter: 'ass' / Error opening output files: Filter not found"
+        );
+        assert_eq!(failure_detail(&["speed=1x".to_string()]), "");
     }
 
     #[tokio::test]
@@ -490,6 +700,125 @@ mod tests {
                 .as_slice(),
             [String::from("00:00:01.00")]
         );
+    }
+
+    #[test]
+    fn partial_outputs_are_removed_but_completed_outputs_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join("partial.mp4");
+        std::fs::write(&partial, b"partial").unwrap();
+        drop(TempArtifact::new(&partial));
+        assert!(!partial.exists());
+        let completed = dir.path().join("completed.mp4");
+        std::fs::write(&completed, b"complete").unwrap();
+        TempArtifact::new(&completed).keep();
+        assert!(completed.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_queued_runner_terminates_real_ffmpeg_and_advances_queue() {
+        use crate::task::{Task, TaskManager, TaskManagerConfig, TaskPriority, TaskStatus};
+        use tokio::sync::{oneshot, Notify};
+        use tokio::time::{sleep, timeout, Duration};
+
+        #[derive(Clone)]
+        struct StartedReporter(Arc<Notify>);
+        #[async_trait]
+        impl ProgressReporterTrait for StartedReporter {
+            async fn update(&self, _: &str) {
+                self.0.notify_one();
+            }
+            async fn finish(&self, _: bool, _: &str) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("ffmpeg.pid");
+        // exec keeps the PID owned by the runner. No shell child survives it.
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s' \"$$\" > \"$1\"; shift; exec ffmpeg \"$@\"",
+            "runner-test",
+        ]);
+        command.arg(&pid_file).args([
+            "-hide_banner",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=16x16:rate=10",
+            "-t",
+            "60",
+            "-f",
+            "null",
+            "-",
+        ]);
+        let started = Arc::new(Notify::new());
+        let reporter = StartedReporter(started.clone());
+        let mut manager = TaskManager::with_config(TaskManagerConfig {
+            max_concurrent_tasks: 1,
+            check_interval_ms: 5,
+            max_queue_size: 20,
+        });
+        manager
+            .add_task(Task::new(
+                "encode".into(),
+                TaskPriority::Normal,
+                async move {
+                    FfmpegJob::new()
+                        .progress(ProgressMode::Time)
+                        .run_with_command(command, Some(&reporter))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            ))
+            .await
+            .unwrap();
+        let (next_tx, next_rx) = oneshot::channel();
+        manager
+            .add_task(Task::new("next".into(), TaskPriority::Normal, async move {
+                let _ = next_tx.send(());
+                Ok(())
+            }))
+            .await
+            .unwrap();
+        manager.start();
+        timeout(Duration::from_secs(10), started.notified())
+            .await
+            .expect("FFmpeg must report progress");
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = || {
+            let pid = pid.clone();
+            async move {
+                Command::new("kill")
+                    .args(["-0", &pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            }
+        };
+        assert!(alive().await);
+        manager.cancel_task("encode").await.unwrap();
+        timeout(Duration::from_secs(3), async {
+            while alive().await {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled FFmpeg process must exit");
+        timeout(Duration::from_secs(1), next_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            manager.get_task_status("encode").await,
+            Some(TaskStatus::Cancelled)
+        );
+        manager.stop().await;
     }
 
     #[cfg(unix)]

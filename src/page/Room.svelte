@@ -29,7 +29,9 @@
   import PlatformIconTabs from "../lib/components/PlatformIconTabs.svelte";
   import AutoRecordIcon from "../lib/components/AutoRecordIcon.svelte";
   import GenerateWholeClipModal from "../lib/components/GenerateWholeClipModal.svelte";
+  import PageTitlebar from "../lib/components/PageTitlebar.svelte";
   import { onMount } from "svelte";
+  import { registerCommands } from "../lib/stores/commands";
 
   interface Props {
     room_count?: number;
@@ -57,55 +59,6 @@
       room.room_info.room_id.toString().includes(query)
     );
   }));
-
-  /** 返回主播当前可展示的检测状态。 */
-  function getDetectionStatus(room: RecorderInfo): DetectionStatus {
-    if (room.room_info.platform !== "douyin") {
-      return room.room_info.status ? "live" : "offline";
-    }
-    switch (room.detection_status) {
-      case "live":
-      case "offline":
-      case "unknown":
-      case "unconfirmed":
-        return room.detection_status;
-      default:
-        return "unknown";
-    }
-  }
-
-  /** 将检测状态转换为卡片上的中文标签。 */
-  function getDetectionLabel(room: RecorderInfo) {
-    switch (getDetectionStatus(room)) {
-      case "live":
-        return "直播进行中";
-      case "offline":
-        return "直播未开始";
-      case "unconfirmed":
-        return "等待首次检测";
-      default:
-        return "监测状态未知";
-    }
-  }
-
-  /** 返回监测异常原因和下次重试时间。 */
-  function getDetectionErrorMessage(room: RecorderInfo) {
-    const errorLabels: Record<string, string> = {
-      network: "网络异常",
-      rate_limited: "请求受限",
-      request_rejected: "接口拒绝请求",
-      account_invalid: "账号无效",
-      verification: "需要验证",
-      parse: "响应格式异常",
-    };
-    const error =
-      errorLabels[room.detection_error_kind] || "最近一次检测未成功";
-    const retryAt =
-      room.next_retry_at > 0
-        ? `；下次重试：${new Date(room.next_retry_at * 1000).toLocaleString()}`
-        : "";
-    return `${error}${retryAt}`;
-  }
 
   function default_avatar(platform: string) {
     const avatarMap = {
@@ -167,30 +120,17 @@
     let new_summary = (await invoke("get_recorder_list")) as RecorderList;
     room_count = new_summary.count;
     room_active = new_summary.recorders.filter(
-      (room) => getDetectionStatus(room) === "live",
+      (room) => room.room_info.status,
     ).length;
     room_inactive = new_summary.recorders.filter(
-      (room) => getDetectionStatus(room) === "offline",
-    ).length;
-    room_unknown = new_summary.recorders.filter(
-      (room) => getDetectionStatus(room) === "unknown",
-    ).length;
-    room_unconfirmed = new_summary.recorders.filter(
-      (room) => getDetectionStatus(room) === "unconfirmed",
+      (room) => !room.room_info.status,
     ).length;
 
-    // 按当前监测状态排序。
+    // sort new_summary.recorders by live_status
     new_summary.recorders.sort((a, b) => {
-      const statusOrder: DetectionStatus[] = [
-        "live",
-        "unknown",
-        "unconfirmed",
-        "offline",
-      ];
-      return (
-        statusOrder.indexOf(getDetectionStatus(a)) -
-        statusOrder.indexOf(getDetectionStatus(b))
-      );
+      if (a.room_info.status && !b.room_info.status) return -1;
+      if (!a.room_info.status && b.room_info.status) return 1;
+      return 0;
     });
 
     // process room cover
@@ -218,6 +158,33 @@
     summary = new_summary;
   }
   onMount(() => watchStateChanges(stateRefresh, ["recorders-changed"]));
+
+  let searchInput: HTMLInputElement | null = $state(null);
+
+  onMount(() =>
+    registerCommands([
+      {
+        id: "room:add",
+        group: "action",
+        title: "添加直播间",
+        detail: "直播间",
+        icon: Plus,
+        keywords: ["add room", "new room", "record"],
+        page: "直播间",
+        run: () => (addModal = true),
+      },
+      {
+        id: "room:search",
+        group: "action",
+        title: "搜索直播间",
+        detail: "直播间",
+        icon: Search,
+        keywords: ["search room", "find", "filter"],
+        page: "直播间",
+        run: () => searchInput?.focus({ preventScroll: true }),
+      },
+    ]),
+  );
 
   // modals
   let deleteModal = $state(false);
@@ -463,9 +430,7 @@
         open("https://live.bilibili.com/" + room.room_info.room_id);
         break;
       case "douyin":
-        if (room.room_resolved && room.web_rid) {
-          open("https://live.douyin.com/" + room.web_rid);
-        }
+        open("https://live.douyin.com/" + room.room_info.room_id);
         break;
       case "douyu":
         open("https://www.douyu.com/" + room.room_info.room_id);
@@ -509,10 +474,7 @@
       platform === "douyu"
         ? new URLSearchParams(room_input.split("?")[1]?.split("#")[0] || "").get("rid")
         : null;
-    room_id =
-      platform === "youtube" || platform === "douyin"
-        ? room_input
-        : room_input.split(/[?#]/)[0];
+    room_id = platform === "youtube" ? room_input : room_input.split(/[?#]/)[0];
     if (douyu_room_id && /^\d+$/.test(douyu_room_id)) {
       room_id = douyu_room_id;
     }
@@ -525,7 +487,11 @@
         }
         break;
       case "douyin":
-        // 保留抖音完整链接，由后端区分主页、分享链接和直播间链接。
+        // room_id might be a link, extract the room_id from the link
+        // example: https://live.douyin.com/1234567890
+        if (room_id.includes("https://") || room_id.includes("bsr://")) {
+          room_id = room_id.split("/").pop();
+        }
         break;
       case "douyu":
         // Douyu accepts numeric room IDs and vanity paths.
@@ -711,6 +677,8 @@
       </div>
     </div>
 
+<div class="custom-scrollbar-light flex-1 overflow-auto bg-canvas p-5">
+  <div class="space-y-6">
     <!-- Room Grid -->
     <div class="grid grid-cols-3 gap-4">
       <!-- Active Room Card -->
@@ -728,9 +696,9 @@
             />
             <!-- Room ID watermark -->
             <div
-              class="absolute bottom-2 left-2 px-2 py-1 rounded-md bg-black/30 backdrop-blur-sm flex items-center"
+              class="absolute bottom-2 left-2 flex h-6 max-w-[55%] items-center rounded-[6px] bg-black/50 px-1.5 backdrop-blur-sm"
             >
-              <span class="text-xs text-white/80 font-mono"
+              <span class="truncate font-mono text-[11px] text-white/85"
                 >{room.room_info.platform.toUpperCase()}#{room.room_info
                   .room_id}</span
               >
@@ -746,30 +714,17 @@
                 {/if}
               </div>
             {/if}
-            {#if detectionStatus === "offline"}
+            {#if !room.room_info.status}
               <div
                 class={"absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-gray-700"}
               >
-                <span>{getDetectionLabel(room)}</span>
-              </div>
-            {:else if detectionStatus === "live"}
-              <div
-                class={"absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-green-500"}
-              >
-                <span>{getDetectionLabel(room)}</span>
-              </div>
-            {:else if detectionStatus === "unconfirmed"}
-              <div
-                class="absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-gray-700"
-              >
-                <span>{getDetectionLabel(room)}</span>
+                <span>直播未开始</span>
               </div>
             {:else}
               <div
-                class="absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-amber-600"
-                title={getDetectionErrorMessage(room)}
+                class={"absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-green-500"}
               >
-                <span>{getDetectionLabel(room)}</span>
+                <span>直播进行中</span>
               </div>
             {/if}
             <button
@@ -834,19 +789,6 @@
                     {room.room_info.room_title}
                   </h3>
                 </div>
-                {#if room.room_info.platform === "douyin" && room.identifier_type === "profile"}
-                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    {room.room_resolved ? "房间号已解析" : "房间号待解析"}
-                  </p>
-                {/if}
-                {#if detectionStatus === "unknown"}
-                  <p
-                    class="mt-1 break-words text-xs text-amber-700 dark:text-amber-400"
-                    title={getDetectionErrorMessage(room)}
-                  >
-                    {getDetectionErrorMessage(room)}
-                  </p>
-                {/if}
               </div>
             </div>
             <div class="flex items-center justify-between">
@@ -1001,18 +943,14 @@
               for="room_id"
               class="block text-sm font-medium text-gray-700 dark:text-gray-300"
             >
-              {selectedPlatform === "douyin"
-                ? "主播主页、分享链接或直播间链接"
-                : "直播间 ID 或链接"}
+              直播间 ID 或链接
             </label>
             <input
               id="room_id"
               type="text"
               bind:value={addRoom}
               class="w-full px-3 py-2 bg-[#f5f5f7] dark:bg-[#1c1c1e] border-0 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-              placeholder={selectedPlatform === "douyin"
-                ? "请输入抖音主页、分享链接、sec_uid 或直播间链接"
-                : "请输入直播间 ID 或链接"}
+              placeholder="请输入直播间 ID 或链接"
             />
           </div>
 

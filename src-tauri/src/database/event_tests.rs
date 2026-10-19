@@ -11,7 +11,8 @@ async fn database() -> Database {
         "CREATE TABLE videos (
             id INTEGER PRIMARY KEY, room_id TEXT, cover TEXT, file TEXT,
             note TEXT, length INTEGER, size INTEGER, status INTEGER, bvid TEXT,
-            title TEXT, desc TEXT, tags TEXT, area INTEGER, created_at TEXT, platform TEXT
+            title TEXT, desc TEXT, tags TEXT, area INTEGER, created_at TEXT, platform TEXT,
+            live_id TEXT, source TEXT, duration REAL, needs_project INTEGER DEFAULT 0
         );
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY, type TEXT, status TEXT, message TEXT,
@@ -53,6 +54,9 @@ async fn video_notifications_follow_committed_mutations() {
             area: 0,
             created_at: "2026-10-11".into(),
             platform: "bilibili".into(),
+            live_id: "".into(),
+            source: "".into(),
+            duration: 10.0,
         })
         .await
         .unwrap();
@@ -143,6 +147,71 @@ async fn tasks_notify_on_creation_progress_completion_and_deletion() {
         "tasks-changed"
     );
     assert!(db.get_tasks().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_task_cannot_be_revived_by_late_progress_or_completion() {
+    let db = database().await;
+    let task = db
+        .generate_task("encode_video_subtitle", "waiting", "{}")
+        .await
+        .unwrap();
+    db.update_task(&task.id, "cancelled", "任务取消", None)
+        .await
+        .unwrap();
+    for status in ["processing", "success", "failed"] {
+        db.update_task(&task.id, status, "late update", Some("{\"late\":true}"))
+            .await
+            .unwrap();
+        let row = db.get_task(&task.id).await.unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.message, "任务取消");
+        assert_eq!(row.metadata, "{}");
+    }
+}
+
+#[tokio::test]
+async fn completed_task_cannot_be_overwritten_by_cancellation() {
+    let db = database().await;
+    for status in ["success", "failed"] {
+        let task = db
+            .generate_task("encode_video_subtitle", "waiting", "{}")
+            .await
+            .unwrap();
+        db.update_task(&task.id, status, "finished", Some("{\"finished\":true}"))
+            .await
+            .unwrap();
+        assert!(!db.cancel_task_if_active(&task.id).await.unwrap());
+        for metadata in [None, Some("{\"cancelled\":true}")] {
+            db.update_task(&task.id, "cancelled", "任务取消", metadata)
+                .await
+                .unwrap();
+            let row = db.get_task(&task.id).await.unwrap();
+            assert_eq!(row.status, status);
+            assert_eq!(row.message, "finished");
+            assert_eq!(row.metadata, "{\"finished\":true}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancellation_claim_only_succeeds_once_for_active_tasks() {
+    let db = database().await;
+    for status in ["pending", "processing"] {
+        let task = db
+            .generate_task("encode_video_subtitle", "waiting", "{}")
+            .await
+            .unwrap();
+        db.update_task(&task.id, status, "working", None)
+            .await
+            .unwrap();
+        assert!(db.cancel_task_if_active(&task.id).await.unwrap());
+        assert!(!db.cancel_task_if_active(&task.id).await.unwrap());
+        let row = db.get_task(&task.id).await.unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.message, "任务取消");
+    }
+    assert!(!db.cancel_task_if_active("missing").await.unwrap());
 }
 
 #[tokio::test]

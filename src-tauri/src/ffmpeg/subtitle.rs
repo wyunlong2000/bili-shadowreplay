@@ -7,7 +7,7 @@ use ffmpeg_utils::ffmpeg_command;
 
 use super::{
     hwaccel,
-    runner::{run_command, ProgressMode, TempArtifact},
+    runner::{run_command, ProgressMode, ProgressTotal, TempArtifact},
 };
 
 fn file_name_str(path: &Path) -> Result<&str, String> {
@@ -16,25 +16,64 @@ fn file_name_str(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("Invalid file name: {}", path.display()))
 }
 
-fn subtitle_filter_path(path: &Path) -> Result<String, String> {
-    if cfg!(target_os = "windows") {
-        Ok(format!(
-            "'{}'",
-            ffmpeg_utils::path_str(path)?
-                .replace('\\', "\\\\")
-                .replace(':', "\\:")
-        ))
-    } else {
-        Ok(format!("'{}'", path.display()))
+fn escape_filter_option(value: &str) -> String {
+    // FFmpeg parses a filtergraph first, then parses each filter's options.
+    // Escape both layers; shell quoting is irrelevant because we pass argv
+    // directly. In particular, a quoted path alone does not protect apostrophes.
+    let mut option = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '\'' | ':') || character.is_ascii_whitespace() {
+            option.push('\\');
+        }
+        option.push(character);
     }
+    let mut graph = String::with_capacity(option.len());
+    for character in option.chars() {
+        if matches!(character, '\\' | '\'' | '[' | ']' | ',' | ';')
+            || character.is_ascii_whitespace()
+        {
+            graph.push('\\');
+        }
+        graph.push(character);
+    }
+    graph
 }
 
-/// Burn an SRT subtitle file into a video.
+pub(super) fn subtitle_filter_path(path: &Path) -> Result<String, String> {
+    Ok(escape_filter_option(ffmpeg_utils::path_str(path)?))
+}
+
+fn subtitle_filter(
+    subtitle: &Path,
+    style: &str,
+    fonts_directory: Option<&Path>,
+) -> Result<String, String> {
+    let mut filter = format!(
+        "{},subtitles=filename={}",
+        hwaccel::H264_SCALE_PAD_FILTER,
+        subtitle_filter_path(subtitle)?,
+    );
+    if !style.is_empty() {
+        filter.push_str(":force_style=");
+        filter.push_str(&escape_filter_option(style));
+    }
+    if let Some(directory) = fonts_directory {
+        filter.push_str(":fontsdir=");
+        filter.push_str(&subtitle_filter_path(directory)?);
+    }
+    Ok(filter)
+}
+
+/// Burn an SRT or ASS subtitle file into a video through libass.
+///
+/// `fonts_directory` supplies the font files given to the WASM preview. Native
+/// libass can still use its system font provider for fallback glyphs.
 pub async fn encode_video_subtitle<R: ProgressReporterTrait>(
     reporter: &R,
     file: &Path,
     subtitle: &Path,
     srt_style: String,
+    fonts_directory: Option<&Path>,
 ) -> Result<String, String> {
     log::info!("Encode video subtitle task start: {}", file.display());
     log::info!("SRT style: {srt_style}");
@@ -46,13 +85,31 @@ pub async fn encode_video_subtitle<R: ProgressReporterTrait>(
         Err(error) => return Err(format!("字幕文件不可用：{} ({error})", subtitle.display())),
     }
 
-    let output_filename = format!("{}{}", constants::PREFIX_SUBTITLE, file_name_str(file)?);
+    // Keep the source name readable and append a short ID before the extension.
+    let source_name = Path::new(file_name_str(file)?);
+    let stem = source_name
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("Invalid file name: {}", file.display()))?;
+    let extension = source_name
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_default();
+    let output_filename = loop {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!(
+            "{}{stem}_{}{extension}",
+            constants::PREFIX_SUBTITLE,
+            &id[..8]
+        );
+        if !file.with_file_name(&name).exists() {
+            break name;
+        }
+    };
     let output_path = file.with_file_name(&output_filename);
-    let subtitle = subtitle_filter_path(subtitle)?;
-    let vf = format!(
-        "{},subtitles={subtitle}:force_style='{srt_style}'",
-        hwaccel::H264_SCALE_PAD_FILTER
-    );
+    let output_guard = super::runner::TempArtifact::new(&output_path);
+    let vf = subtitle_filter(subtitle, &srt_style, fonts_directory)?;
     let mut command = ffmpeg_command();
     let video_encoder = hwaccel::get_x264_encoder().await;
     command.arg("-i").arg(file);
@@ -63,12 +120,13 @@ pub async fn encode_video_subtitle<R: ProgressReporterTrait>(
 
     run_command(
         command,
-        ProgressMode::prefixed("压制中："),
+        ProgressMode::stage("压制字幕", ProgressTotal::FirstInput),
         "Encode video subtitle",
         Some(reporter),
     )
     .await
     .map_err(|error| error.to_string())?;
+    output_guard.keep();
     log::info!("Encode video subtitle task end: {}", output_path.display());
     Ok(output_filename)
 }
@@ -85,6 +143,7 @@ pub async fn generate_video_subtitle(
     openai_api_key: &str,
     openai_api_endpoint: &str,
     language_hint: &str,
+    powerlive_db: Option<&crate::database::Database>,
 ) -> Result<GenerateResult, String> {
     match generator_type {
         SubtitleGeneratorType::Whisper => {
@@ -293,26 +352,70 @@ pub async fn generate_video_subtitle(
             Ok(full_result)
         }
         SubtitleGeneratorType::PowerLive => {
-            let generator = crate::subtitle_generator::powerlive::new(
-                "pk_d2755cd38ef03f7ed3a92be1f1471e4adea90a1a5d4b3900345298a68fba0821",
-            )
-            .await
-            .map_err(|_| "Failed to initialize PowerLive".to_string())?;
+            let db = powerlive_db.ok_or("请先在设置中登录 PowerLive 账号")?;
+            let generator = crate::subtitle_generator::powerlive::new(db).await?;
             let extension = file
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .unwrap_or_default();
-            let audio_file = if matches!(extension, "opus" | "wav" | "mp3" | "m4a" | "flac") {
+            let _extracted;
+            let audio_file = if matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "opus" | "wav" | "mp3" | "m4a" | "flac"
+            ) {
                 file.to_path_buf()
             } else {
-                file.with_extension("opus")
+                let path = super::audio::extract_full_audio(file).await?;
+                _extracted = TempArtifact::new(path.clone());
+                path
             };
-            if !audio_file.exists() {
-                return Err("Audio file not found".to_string());
-            }
             generator
                 .generate_subtitle(reporter, &audio_file, language_hint)
                 .await
         }
+    }
+}
+
+#[cfg(test)]
+mod subtitle_filter_tests {
+    use super::*;
+
+    #[test]
+    fn escapes_both_filter_parsers_for_paths_and_style_values() {
+        assert_eq!(escape_filter_option("'"), r"\\\'");
+        assert_eq!(escape_filter_option(":"), r"\\:");
+        assert_eq!(escape_filter_option("\\"), r"\\\\");
+        assert_eq!(escape_filter_option(",;[]"), r"\,\;\[\]");
+        assert_eq!(escape_filter_option(" "), r"\\\ ");
+    }
+
+    #[test]
+    fn ass_filter_has_no_force_style_override() {
+        let filter = subtitle_filter(Path::new("/tmp/subtitle.ass"), "", None).unwrap();
+        assert!(filter.ends_with("subtitles=filename=/tmp/subtitle.ass"));
+        assert!(!filter.contains("force_style"));
+    }
+
+    #[test]
+    fn srt_style_remains_a_single_filter_option() {
+        let filter = subtitle_filter(
+            Path::new("/tmp/subtitle.srt"),
+            "FontName=Arial,FontSize=24",
+            None,
+        )
+        .unwrap();
+        assert!(filter.ends_with(r":force_style=FontName=Arial\,FontSize=24"));
+    }
+
+    #[test]
+    fn fonts_directory_uses_the_same_filter_escaping_as_subtitle_paths() {
+        let filter = subtitle_filter(
+            Path::new("/tmp/subtitle.ass"),
+            "",
+            Some(Path::new("/tmp/font's,[test]")),
+        )
+        .unwrap();
+        assert!(filter.ends_with(r":fontsdir=/tmp/font\\\'s\,\[test\]"));
+        assert!(!filter.contains("force_style"));
     }
 }

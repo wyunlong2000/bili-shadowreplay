@@ -1,6 +1,8 @@
 use recorder::{danmu::DanmuEntry, events::RecorderEvent};
 use serde_json::{json, Value};
 
+use crate::progress::progress_reporter::StageProgress;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RoomTopic {
     pub platform: String,
@@ -38,6 +40,8 @@ impl RoomTopic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataChange {
     Videos,
+    Projects,
+    Uploads,
     Tasks,
     Recorders,
     Records,
@@ -48,6 +52,8 @@ impl DataChange {
     fn event_name(self) -> &'static str {
         match self {
             Self::Videos => "videos-changed",
+            Self::Projects => "projects-changed",
+            Self::Uploads => "uploads-changed",
             Self::Tasks => "tasks-changed",
             Self::Recorders => "recorders-changed",
             Self::Records => "records-changed",
@@ -63,6 +69,8 @@ pub enum AppEvent {
     ProgressUpdate {
         id: String,
         content: String,
+        /// Structured form of `content` for clients that draw a progress bar.
+        progress: Option<StageProgress>,
     },
     ProgressFinished {
         id: String,
@@ -74,6 +82,12 @@ pub enum AppEvent {
         entry: DanmuEntry,
     },
     DataChanged(DataChange),
+    /// A preview window asks the main window to start an upload of a
+    /// `material` or `project`.
+    UploadRequested {
+        source: String,
+        id: i64,
+    },
 }
 
 pub struct ClientEvent {
@@ -85,10 +99,17 @@ impl AppEvent {
     /// Canonical client event names and payloads shared by both transports.
     pub fn client_event(&self) -> ClientEvent {
         let (name, payload) = match self {
-            Self::ProgressUpdate { id, content } => (
-                format!("progress-update:{id}"),
-                json!({ "id": id, "content": content }),
-            ),
+            Self::ProgressUpdate {
+                id,
+                content,
+                progress,
+            } => {
+                let mut payload = json!({ "id": id, "content": content });
+                if let Some(progress) = progress {
+                    payload["progress"] = json!(progress);
+                }
+                (format!("progress-update:{id}"), payload)
+            }
             Self::ProgressFinished {
                 id,
                 success,
@@ -104,6 +125,10 @@ impl AppEvent {
                 (topic.event_name(), payload)
             }
             Self::DataChanged(change) => (change.event_name().into(), Value::Null),
+            Self::UploadRequested { source, id } => (
+                "upload-requested".into(),
+                json!({ "source": source, "id": id }),
+            ),
         };
         ClientEvent { name, payload }
     }
@@ -115,6 +140,7 @@ impl AppEvent {
             RecorderEvent::ProgressUpdate { id, content } => Some(Self::ProgressUpdate {
                 id: id.clone(),
                 content: content.clone(),
+                progress: None,
             }),
             RecorderEvent::ProgressFinished {
                 id,
@@ -166,12 +192,31 @@ mod tests {
         let update = AppEvent::ProgressUpdate {
             id: "task-1".into(),
             content: "encoding".into(),
+            progress: None,
         }
         .client_event();
         assert_eq!(update.name, "progress-update:task-1");
         assert_eq!(
             update.payload,
             json!({"id": "task-1", "content": "encoding"})
+        );
+        let measured = AppEvent::ProgressUpdate {
+            id: "task-1".into(),
+            content: "压制弹幕 40%".into(),
+            progress: Some(StageProgress {
+                stage: "压制弹幕".into(),
+                processed: 12.0,
+                total: Some(30.0),
+                speed: None,
+            }),
+        }
+        .client_event();
+        assert_eq!(
+            measured.payload,
+            json!({
+                "id": "task-1", "content": "压制弹幕 40%",
+                "progress": {"stage": "压制弹幕", "processed": 12.0, "total": 30.0},
+            })
         );
         let finish = AppEvent::ProgressFinished {
             id: "task-1".into(),

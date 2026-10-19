@@ -684,7 +684,7 @@ impl BsrTool {
             ),
             Self::action_schema(
                 "encode_video_subtitle",
-                "Burn subtitles into a video after user confirmation.",
+                "Queue a subtitle burn-in job after user confirmation. Returns a pending task immediately; use get_background_tasks to check completion.",
                 json!({ "id": integer(), "srt_style": string() }),
                 &["id", "srt_style"],
             ),
@@ -702,7 +702,7 @@ impl BsrTool {
             ),
             Self::action_schema(
                 "clip_range",
-                "Create a video from one or more archive ranges after user confirmation.",
+                "Create a material video from one or more archive ranges after user confirmation. Danmaku is kept alongside the material instead of being burned in, so the danmu flag has no effect.",
                 json!({
                     "reason": string(),
                     "clip_range_params": {

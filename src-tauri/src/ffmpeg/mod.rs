@@ -8,6 +8,7 @@ pub mod general;
 pub mod hwaccel;
 pub mod metadata;
 pub mod playlist;
+pub mod project;
 pub mod runner;
 pub mod subtitle;
 
@@ -16,7 +17,9 @@ pub(crate) use audio::get_audio_duration;
 pub use audio::{extract_audio_sample, extract_full_audio};
 pub use clip::{clip_from_video_file, transcode, trim_video};
 pub use danmu::encode_video_danmu;
-pub use metadata::{check_ffmpeg, check_videos, generate_thumbnail};
+pub use metadata::{
+    check_ffmpeg, check_videos, extract_frame, generate_thumbnail, get_random_thumbnail_timestamp,
+};
 pub use subtitle::{encode_video_subtitle, generate_video_subtitle};
 
 #[cfg(test)]
@@ -29,7 +32,7 @@ use ffmpeg_utils::extract_video_metadata;
 use ffmpeg_utils::ffmpeg_command;
 use serde::{Deserialize, Serialize};
 
-use self::runner::{run_command, ProgressMode};
+use self::runner::{run_command, ProgressMode, ProgressTotal};
 
 /// File name of `path` as UTF-8, for display and ffmpeg filter strings.
 #[cfg(test)]
@@ -102,7 +105,10 @@ pub async fn execute_ffmpeg_conversion(
 ) -> Result<(), String> {
     run_command(
         cmd,
-        ProgressMode::labeled("正在转换视频格式... ", format!(" ({mode_name})")),
+        ProgressMode::stage(
+            format!("转换视频格式（{mode_name}）"),
+            ProgressTotal::FirstInput,
+        ),
         format!("视频格式转换失败 ({mode_name})"),
         Some(reporter),
     )
@@ -331,6 +337,7 @@ mod tests {
             Path::new("tests/video/test.mp4"),
             Path::new("tests/video/does_not_exist.srt"),
             "FontSize=24".to_string(),
+            None,
         )
         .await;
 
@@ -348,6 +355,7 @@ mod tests {
             Path::new("tests/video/test.mp4"),
             &empty_srt,
             "FontSize=24".to_string(),
+            None,
         )
         .await;
 
@@ -459,6 +467,7 @@ mod tests {
             "",
             "",
             "zh",
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -475,10 +484,26 @@ mod tests {
             "",
             "",
             "zh",
+            None,
         )
         .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("API key not configured"));
+
+        let result = generate_video_subtitle(
+            None,
+            test_file,
+            SubtitleGeneratorType::PowerLive,
+            Path::new(""),
+            "",
+            "",
+            "",
+            "",
+            "zh",
+            None,
+        )
+        .await;
+        assert!(result.unwrap_err().contains("登录 PowerLive"));
 
         // 未知类型应在服务边界之前被拒绝
         let error = SubtitleGeneratorType::parse("unknown_type").unwrap_err();
