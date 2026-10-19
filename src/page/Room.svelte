@@ -955,6 +955,8 @@
     </div>
   </div>
 </div>
+</div>
+</div>
 {#if deleteModal}
   <div
     class="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center"
