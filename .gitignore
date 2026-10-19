@@ -43,3 +43,4 @@ docs/.vitepress/dist
 
 # Local updater signing key (never commit the private key).
 .updater/
+/.workbuddy/
