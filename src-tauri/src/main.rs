@@ -605,73 +605,8 @@ fn get_migrations() -> Vec<Migration> {
         },
         Migration {
             version: 22,
-            description: "add_automation_tables",
-            sql: r#"
-                CREATE TABLE IF NOT EXISTS automation_analysis (
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    live_id TEXT NOT NULL,
-                    parent_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    processed_until_ms INTEGER NOT NULL DEFAULT 0,
-                    window_seconds INTEGER NOT NULL,
-                    subtitle_json TEXT,
-                    task_id TEXT,
-                    error_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (platform, room_id, live_id)
-                );
-                CREATE TABLE IF NOT EXISTS automation_candidates (
-                    id TEXT PRIMARY KEY,
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    parent_id TEXT NOT NULL,
-                    live_id TEXT NOT NULL,
-                    start_ms INTEGER NOT NULL,
-                    end_ms INTEGER NOT NULL,
-                    score REAL NOT NULL,
-                    signals_json TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    clip_task_id TEXT,
-                    video_id INTEGER,
-                    notify_status TEXT NOT NULL DEFAULT 'pending',
-                    error_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (platform, room_id, parent_id, start_ms, end_ms)
-                );
-                CREATE INDEX IF NOT EXISTS idx_candidates_parent
-                    ON automation_candidates (room_id, parent_id);
-                CREATE TABLE IF NOT EXISTS detection_states (
-                    platform TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    confirmed INTEGER,
-                    last_checked_at INTEGER NOT NULL DEFAULT 0,
-                    last_success_at INTEGER NOT NULL DEFAULT 0,
-                    error_kind TEXT NOT NULL DEFAULT '',
-                    consecutive_unknown INTEGER NOT NULL DEFAULT 0,
-                    next_retry_at INTEGER NOT NULL DEFAULT 0,
-                    backoff_level INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (platform, room_id)
-                );
-                CREATE TABLE IF NOT EXISTS automation_notifications (
-                    id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL UNIQUE,
-                    event_json TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_retry_at INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_automation_notifications_retry
-                    ON automation_notifications (status, next_retry_at);
-            "#,
+            description: "add_upload_cover43",
+            sql: "ALTER TABLE uploads ADD COLUMN cover43 TEXT NOT NULL DEFAULT '';",
             kind: MigrationKind::Up,
         },
     ]
@@ -841,12 +776,10 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
         Sqlite::create_database(&conn_url).await?;
     }
     let db_pool: Pool<Sqlite> = Pool::connect(&conn_url).await?;
-    reconcile_legacy_automation_migrations(&db_pool).await?;
     let migrations = get_migrations();
 
     let migrator = Migrator::new(MigrationList(migrations)).await?;
     migrator.run(&db_pool).await?;
-    ensure_recorder_identity_columns(&db_pool).await?;
 
     let credentials = CredentialCipher::load(&db_pool).await?;
     let events = EventBus::new();
@@ -934,7 +867,6 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
         .get("sqlite:data_v2.db")
         .ok_or("sqlite:data_v2.db is not registered")?;
     let tauri_plugin_sql::DbPool::Sqlite(sqlite_pool) = dbpool;
-    ensure_recorder_identity_columns(sqlite_pool).await?;
     let credentials = match CredentialCipher::load(sqlite_pool).await {
         Ok(credentials) => credentials,
         Err(error)
@@ -1213,6 +1145,9 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::project::get_material_peaks,
         crate::handlers::project::get_material_danmu,
         crate::handlers::project::generate_materials,
+        crate::handlers::sticker::get_cover_stickers,
+        crate::handlers::sticker::add_cover_sticker,
+        crate::handlers::sticker::delete_cover_sticker,
         crate::handlers::upload::get_uploads,
         crate::handlers::upload::get_upload,
         crate::handlers::upload::create_upload,
@@ -1278,10 +1213,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = tauri::generate_context!();
     let database_access_error = match app_config_dir(&context.config().identifier) {
         Ok(config_dir) => ensure_database_access(&config_dir)
-            .and_then(|()| {
-                prepare_gui_migration_history(&config_dir)
-                    .map_err(io::Error::other)
-            })
             .err()
             .map(|error| (Some(config_dir), error)),
         Err(error) => Some((None, error)),
@@ -1291,7 +1222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .map_or_else(|| "无法确定".to_string(), |path| path.display().to_string());
         let message = format!(
-            "应用无法访问或准备数据目录，因此不能启动。\n\n数据目录：{}\n系统错误：{}\n\n请检查该目录及 data_v2.db 的读写权限，然后重新启动应用。",
+            "应用无法访问数据目录，因此不能启动。\n\n数据目录：{}\n系统错误：{}\n\n请检查该目录及 data_v2.db 的读写权限，然后重新启动应用。",
             path, error
         );
         sentry::capture_message(&message, sentry::Level::Error);
