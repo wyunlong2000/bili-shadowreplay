@@ -229,6 +229,7 @@ pub async fn add_account(
     Ok(())
 }
 
+/// 移除账号凭证并在无可用账号时停止对应平台的录制监测
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn remove_account(
     state: state_type!(),
@@ -240,7 +241,22 @@ pub async fn remove_account(
         let client = reqwest::Client::new();
         let _ = bilibili::api::logout(&client, &account.to_account()).await;
     }
-    Ok(state.db.remove_account(&platform, &uid).await?)
+    state.db.remove_account(&platform, &uid).await?;
+
+    // 检查平台依赖：若该平台强制依赖账号且已无可用账号，立即停止该平台所有运行中的录制监测
+    if let Ok(plat_type) = PlatformType::from_str(&platform) {
+        if crate::recorder_manager::RecorderManager::platform_requires_account(plat_type) {
+            let remaining = state.db.get_account_by_platform(&platform).await;
+            if remaining.is_err() {
+                state
+                    .recorder_manager
+                    .stop_recorders_by_platform(plat_type)
+                    .await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]

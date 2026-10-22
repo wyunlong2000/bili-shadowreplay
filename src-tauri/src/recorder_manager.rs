@@ -643,6 +643,26 @@ impl RecorderManager {
                     ),
                 );
             }
+            // 检查当前运行中的录制器：若所属平台强制依赖账号但当前无可用账号，则停止监测
+            let running_keys: Vec<String> = self.recorders.read().await.keys().cloned().collect();
+            for key in running_keys {
+                if let Some((plat_str, room_id)) = key.split_once(':') {
+                    if let Ok(plat) = PlatformType::from_str(plat_str) {
+                        if Self::platform_requires_account(plat)
+                            && self.db.get_account_by_platform(plat_str).await.is_err()
+                        {
+                            log::info!("平台 {plat:?} 无可用账号，已停止直播间 {room_id} 的自动监测");
+                            let rec = self.recorders.read().await.get(&key).cloned();
+                            if let Some(rec) = rec {
+                                rec.stop().await;
+                            }
+                            self.recorders.write().await.remove(&key);
+                            self.db.notify_change(DataChange::Recorders);
+                        }
+                    }
+                }
+            }
+
             let mut recorders_to_add = Vec::new();
             for (platform, room_id) in recorder_map.keys() {
                 let recorder_id = format!("{}:{}", platform.as_str(), room_id);
@@ -671,15 +691,8 @@ impl RecorderManager {
                     .db
                     .get_account_by_platform(platform.clone().as_str())
                     .await;
-                if platform != PlatformType::Huya
-                    && platform != PlatformType::Douyu
-                    && platform != PlatformType::Kuaishou
-                    && platform != PlatformType::TikTok
-                    && platform != PlatformType::Twitch
-                    && platform != PlatformType::Youtube
-                    && account.is_err()
-                {
-                    log::warn!("Failed to find an account for {platform:?} {room_id}");
+                if Self::platform_requires_account(platform) && account.is_err() {
+                    // 仅当账号和直播间都存在时才执行监测；无账号时静默跳过
                     continue;
                 }
                 let account = if let Ok(account) = account {
@@ -889,48 +902,93 @@ impl RecorderManager {
         recorders.clear();
     }
 
-    /// Remove a recorder from the manager
+    /// 停止并移除指定平台下的所有运行中录制器
+    pub async fn stop_recorders_by_platform(&self, platform: PlatformType) {
+        let prefix = format!("{}:", platform.as_str());
+        let to_stop: Vec<(String, Arc<dyn RecorderTrait + Send + Sync>)> = {
+            let recorders = self.recorders.read().await;
+            recorders
+                .iter()
+                .filter(|(id, _)| id.starts_with(&prefix))
+                .map(|(id, r)| (id.clone(), r.clone()))
+                .collect()
+        };
+
+        for (id, recorder) in to_stop {
+            log::info!("正在停止平台 {platform:?} 的录制器: {id}");
+            recorder.stop().await;
+            self.recorders.write().await.remove(&id);
+        }
+        self.db.notify_change(DataChange::Recorders);
+    }
+
+    /// 检查指定平台是否必须依赖登录账号凭证才能执行监测
+    pub fn platform_requires_account(platform: PlatformType) -> bool {
+        !matches!(
+            platform,
+            PlatformType::Huya
+                | PlatformType::Douyu
+                | PlatformType::Kuaishou
+                | PlatformType::TikTok
+                | PlatformType::Twitch
+                | PlatformType::Youtube
+        )
+    }
+
+    /// 从管理器中移除直播间，并清理数据库记录与缓存文件夹
     ///
-    /// This will stop the recorder and remove it from the manager
-    /// and remove the related cache folder
+    /// 无论直播间是否已在内存中实例化，都会清理数据库中的直播间及录播记录，
+    /// 若内存中存在活跃实例则执行停止，最后清除相关缓存目录。
     pub async fn remove_recorder(
         &self,
         platform: PlatformType,
         room_id: &str,
     ) -> Result<RecorderRow, RecorderManagerError> {
-        // check recorder exists
         let recorder_id = format!("{}:{}", platform.as_str(), room_id);
-        if !self.recorders.read().await.contains_key(&recorder_id) {
-            return Err(RecorderManagerError::NotFound {
-                room_id: room_id.to_string(),
-            });
+        let in_memory = self.recorders.read().await.contains_key(&recorder_id);
+
+        // 从数据库中移除直播间及相关录播记录
+        let recorder = match self.db.remove_recorder(room_id).await {
+            Ok(rec) => rec,
+            Err(e) => {
+                if !in_memory {
+                    return Err(RecorderManagerError::NotFound {
+                        room_id: room_id.to_string(),
+                    });
+                }
+                RecorderRow {
+                    room_id: room_id.to_string(),
+                    platform: platform.as_str().to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    auto_start: true,
+                    extra: "".to_string(),
+                    web_rid: None,
+                    identifier_type: "room".to_string(),
+                    profile_name: "".to_string(),
+                    profile_avatar: "".to_string(),
+                }
+            }
+        };
+
+        // 若内存中存在活跃的录制器，执行停止并从管理器中移除
+        if in_memory {
+            log::debug!("Add to to_remove: {recorder_id}");
+            self.to_remove.write().await.insert(recorder_id.clone());
+
+            log::debug!("Stop recorder: {recorder_id}");
+            // Stop without holding the map's read lock: stop() awaits task shutdown.
+            let recorder_ref = self.recorders.read().await.get(&recorder_id).cloned();
+            if let Some(recorder_ref) = recorder_ref {
+                recorder_ref.stop().await;
+            }
+
+            log::debug!("Remove recorder from manager: {recorder_id}");
+            self.recorders.write().await.remove(&recorder_id);
+            self.to_remove.write().await.remove(&recorder_id);
         }
-
-        // remove from db
-        let recorder = self.db.remove_recorder(room_id).await?;
-
-        // add to to_remove
-        log::debug!("Add to to_remove: {recorder_id}");
-        self.to_remove.write().await.insert(recorder_id.clone());
-
-        // stop recorder
-        log::debug!("Stop recorder: {recorder_id}");
-        // Stop without holding the map's read lock: stop() awaits task shutdown.
-        let recorder_ref = self.recorders.read().await.get(&recorder_id).cloned();
-        if let Some(recorder_ref) = recorder_ref {
-            recorder_ref.stop().await;
-        }
-
-        // remove recorder
-        log::debug!("Remove recorder from manager: {recorder_id}");
-        self.recorders.write().await.remove(&recorder_id);
         self.db.notify_change(DataChange::Recorders);
 
-        // remove from to_remove
-        log::debug!("Remove from to_remove: {recorder_id}");
-        self.to_remove.write().await.remove(&recorder_id);
-
-        // remove related cache folder
+        // 移除相关缓存目录
         let cache_folder = format!(
             "{}/{}/{}",
             self.config.read().await.cache,
