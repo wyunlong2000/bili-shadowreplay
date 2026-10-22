@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod compiler;
 pub mod evidence;
+pub mod narration;
 pub mod policy;
 pub mod scheduler;
 pub mod scoring;
@@ -10,6 +11,7 @@ pub mod types;
 pub use analysis::run_analysis_pipeline;
 pub use compiler::TimelineCompiler;
 pub use evidence::{EvidenceCue, EvidenceIndex};
+pub use narration::{GeneratedNarration, NarrationPlanner, TtsSynthesizer};
 pub use policy::{AutoClippingPolicy, RoomPolicyOverride};
 pub use scheduler::AutomationService;
 pub use scoring::{CandidateRanker, RawHighlightCandidate};

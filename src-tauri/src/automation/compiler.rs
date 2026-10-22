@@ -5,11 +5,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::evidence::EvidenceCue;
-use super::types::{AutomationCandidateRow, AutomationOutputRow, EditPlan, EditPlanClip, EditPlanOverlay};
+use super::narration::{GeneratedNarration, NarrationPlanner, TtsSynthesizer, register_narration_audio_file};
+use super::types::{AutomationCandidateRow, AutomationOutputRow, EditPlan, EditPlanClip, EditPlanNarration, EditPlanOverlay};
 use crate::database::project::ProjectRow;
 use crate::database::video::{MaterialSource, VideoRow};
 use crate::events::DataChange;
-use crate::project::{Overlay, OverlayContent, OverlayTrack, Timeline, TimelineClip, TimelineSubtitle, TrackKind};
+use crate::project::{AudioItem, AudioSource, AudioTrack, Overlay, OverlayContent, OverlayTrack, Timeline, TimelineClip, TimelineSubtitle, TrackKind};
 
 /// 自动化工程与时间轴编译器。
 pub struct TimelineCompiler;
@@ -374,7 +375,7 @@ impl TimelineCompiler {
         let output_row = AutomationOutputRow {
             id: format!("out_{}", Uuid::new_v4().simple()),
             candidate_id: candidate.id.clone(),
-            output_mode: "acoustic".to_string(),
+            output_mode: "original".to_string(),
             plan_version: 1,
             plan_json,
             plan_hash,
@@ -404,6 +405,359 @@ impl TimelineCompiler {
         state.db.notify_change(DataChange::Automation);
         state.db.notify_change(DataChange::Videos);
         state.db.notify_change(DataChange::Projects);
+
+        Ok((material.id, project.id))
+    }
+
+    /// 根据流复制关键帧校准与跨镜头解说规则，从候选与生成的解说音频编译解说版 Timeline V2 工程。
+    pub fn compile_commentary_timeline(
+        candidate: &AutomationCandidateRow,
+        material: &VideoRow,
+        cues: &[EvidenceCue],
+        synthesized_narrations: &[(GeneratedNarration, i64, f64)],
+    ) -> (Timeline, EditPlan) {
+        let req_start_sec = (candidate.start_ms as f64) / 1000.0;
+        let req_duration_sec = ((candidate.end_ms - candidate.start_ms) as f64) / 1000.0;
+
+        let actual_start_sec = if !material.source.is_empty() {
+            match serde_json::from_str::<MaterialSource>(&material.source) {
+                Ok(source) => source
+                    .ranges
+                    .first()
+                    .map(|r| r.start)
+                    .unwrap_or(req_start_sec),
+                Err(_) => req_start_sec,
+            }
+        } else {
+            req_start_sec
+        };
+
+        let clip_in_sec = (req_start_sec - actual_start_sec).max(0.0);
+        let clip_out_sec = clip_in_sec + req_duration_sec;
+        let clip_id = format!("clip_{}", Uuid::new_v4().simple());
+
+        let clip = TimelineClip {
+            id: clip_id.clone(),
+            material_id: material.id,
+            start: clip_in_sec,
+            end: clip_out_sec,
+            volume: 1.0,
+        };
+
+        // 证据字幕
+        let mut subtitles = Vec::new();
+        for cue in cues {
+            let cue_start_sec = (cue.start_ms as f64) / 1000.0;
+            let cue_end_sec = (cue.end_ms as f64) / 1000.0;
+            if cue_end_sec <= req_start_sec || cue_start_sec >= req_start_sec + req_duration_sec {
+                continue;
+            }
+            let sub_start_sec = (cue_start_sec - actual_start_sec).max(0.0);
+            let sub_end_sec = (cue_end_sec - actual_start_sec).max(sub_start_sec);
+            subtitles.push(TimelineSubtitle {
+                id: format!("sub_{}", Uuid::new_v4().simple()),
+                clip_id: clip_id.clone(),
+                start: sub_start_sec,
+                end: sub_end_sec,
+                text: cue.text.clone(),
+            });
+        }
+
+        // 标题提示文字浮层
+        let title_text = if !candidate.reason.trim().is_empty() {
+            let clean = candidate.reason.replace('\n', " ");
+            if clean.chars().count() > 24 {
+                format!("解说 · {}...", clean.chars().take(22).collect::<String>())
+            } else {
+                format!("解说 · {}", clean)
+            }
+        } else {
+            "AI 精选解说".to_string()
+        };
+
+        let overlay_duration = 3.5_f64.min(req_duration_sec.max(1.0));
+        let title_element = serde_json::json!({
+            "id": 1,
+            "kind": "text",
+            "content": title_text,
+            "x": 960.0,
+            "y": 180.0,
+            "rotation": 0.0,
+            "font": "",
+            "fontSize": 48,
+            "bold": true,
+            "align": "center",
+            "fill": "#FFE14D",
+            "stroke": "#1A1A1A",
+            "strokeWidth": 0.1,
+            "background": null,
+            "shadow": true,
+        });
+
+        let title_overlay = Overlay {
+            id: format!("ov_{}", Uuid::new_v4().simple()),
+            clip_id: clip_id.clone(),
+            start: 0.0,
+            duration: overlay_duration,
+            content: OverlayContent::Text { element: title_element },
+        };
+
+        let overlay_track = OverlayTrack {
+            id: format!("tr_{}", Uuid::new_v4().simple()),
+            kind: Some(TrackKind::Sticker),
+            items: vec![title_overlay],
+        };
+
+        // 解说音频轨道（跨镜头触发起点锚定片段，持续时间投射到工程时间轴）
+        let mut audio_items = Vec::new();
+        let mut plan_narrations = Vec::new();
+
+        for (narration, audio_id, duration) in synthesized_narrations {
+            // 在锚定片段素材时间上的起点
+            let item_start = (clip_in_sec + narration.start_sec).max(0.0);
+
+            audio_items.push(AudioItem {
+                id: format!("aud_{}", Uuid::new_v4().simple()),
+                clip_id: clip_id.clone(),
+                start: item_start,
+                duration: *duration,
+                source: AudioSource::File { audio_id: *audio_id },
+                source_start: 0.0,
+                volume: 1.0,
+                fade_in: 0.1,
+                fade_out: 0.1,
+            });
+
+            plan_narrations.push(EditPlanNarration {
+                id: format!("plan_nar_{}", Uuid::new_v4().simple()),
+                clip_id: clip_id.clone(),
+                start_ms: (narration.start_sec * 1000.0) as i64,
+                text: narration.text.clone(),
+                audio_asset_id: Some(audio_id.to_string()),
+                measured_duration_ms: Some((*duration * 1000.0) as i64),
+                ducking_volume: Some(narration.ducking_volume),
+            });
+        }
+
+        let audio_track = AudioTrack {
+            id: format!("atr_{}", Uuid::new_v4().simple()),
+            items: audio_items,
+        };
+
+        let timeline = Timeline {
+            version: 2,
+            clips: vec![clip],
+            subtitles,
+            tracks: vec![overlay_track],
+            subtitle_style: None,
+            danmu: true,
+            audio_tracks: vec![audio_track],
+        };
+
+        let edit_plan = EditPlan {
+            version: 2,
+            output_mode: super::types::AutomationOutputMode::Commentary,
+            title: candidate.reason.clone(),
+            clips: vec![EditPlanClip {
+                id: clip_id.clone(),
+                live_id: candidate.live_id.clone(),
+                source_start_ms: candidate.start_ms,
+                source_end_ms: candidate.end_ms,
+            }],
+            overlays: vec![EditPlanOverlay {
+                id: format!("plan_ov_{}", Uuid::new_v4().simple()),
+                clip_id,
+                start_ms: 0,
+                end_ms: (overlay_duration * 1000.0) as i64,
+                kind: "title_callout".to_string(),
+                text: title_text,
+                position_normalized: Some((0.5, 0.167)),
+            }],
+            narrations: plan_narrations,
+            target_aspect_ratio: None,
+        };
+
+        (timeline, edit_plan)
+    }
+
+    /// 为指定候选自动创建素材并生成 Timeline V2 解说版工程。
+    pub async fn process_candidate_commentary(
+        state: &crate::state::State,
+        candidate_id: &str,
+    ) -> Result<(i64, i64), String> {
+        let candidate = state
+            .db
+            .get_automation_candidate(candidate_id)
+            .await
+            .map_err(|e| format!("获取候选记录失败: {e}"))?
+            .ok_or_else(|| "候选记录不存在".to_string())?;
+
+        let output_dir: std::path::PathBuf = state.config.read().await.output.clone().into();
+        let cache_dir: std::path::PathBuf = state.config.read().await.cache.clone().into();
+        let llm_cfg = state.config.read().await.llm.clone();
+
+        // 1. 构建素材截取参数并创建素材
+        let req_start_sec = (candidate.start_ms as f64) / 1000.0;
+        let req_end_sec = (candidate.end_ms as f64) / 1000.0;
+
+        let params = crate::handlers::video::ClipRangeParams {
+            platform: candidate.platform.clone(),
+            room_id: candidate.room_id.clone(),
+            parent_id: candidate.parent_id.clone(),
+            live_id: candidate.live_id.clone(),
+            ranges: vec![crate::handlers::video::ClipRange {
+                start: req_start_sec,
+                end: req_end_sec,
+            }],
+            title: format!("解说高光_{}", &candidate.id[..candidate.id.len().min(8)]),
+            note: format!("AI解说: {}", candidate.reason),
+            create_project: false,
+            auto_subtitle: false,
+        };
+
+        let reporter = crate::task::TaskReporter::new("auto_clip_commentary", &state.db);
+        let material = crate::handlers::video::create_material(state, &reporter, &params).await?;
+
+        // 2. 证据字幕
+        let manifest_res = super::source::SourceManifest::build(
+            &state.db,
+            &candidate.platform,
+            &candidate.room_id,
+            &candidate.parent_id,
+            &cache_dir,
+        )
+        .await
+        .unwrap_or(None);
+
+        let manifest_items = manifest_res.map(|m| m.items).unwrap_or_default();
+        let evidence_index = super::evidence::EvidenceIndex::build(
+            &state.db,
+            &candidate.platform,
+            &candidate.room_id,
+            &manifest_items,
+        )
+        .await
+        .unwrap_or_default();
+
+        let cues = evidence_index.cues_in_range(candidate.start_ms, candidate.end_ms);
+        let clip_duration_sec = req_end_sec - req_start_sec;
+
+        // 3. 规划解说文案
+        let planned_narrations = NarrationPlanner::plan_narrations(&candidate, &cues, clip_duration_sec);
+
+        // 4. TTS 语音合成并登记音频资产
+        let mut synthesized = Vec::new();
+        let output_sub_dir = format!("automation/{}", candidate.id);
+        let full_output_dir = output_dir.join(&output_sub_dir);
+        let _ = tokio::fs::create_dir_all(&full_output_dir).await;
+
+        for (idx, nar) in planned_narrations.into_iter().enumerate() {
+            let file_name = format!("narration_{}_{}.wav", idx, Uuid::new_v4().simple());
+            let full_audio_path = full_output_dir.join(&file_name);
+            let relative_file_path = format!("{}/{}", output_sub_dir, file_name);
+
+            let duration = match TtsSynthesizer::synthesize(
+                &llm_cfg.endpoint,
+                &llm_cfg.api_key,
+                "tts-1",
+                "alloy",
+                &nar.text,
+                &full_audio_path,
+            )
+            .await
+            {
+                Ok(d) => d,
+                Err(err) => {
+                    log::warn!("TTS 配音失败，使用静音回退: {err}");
+                    TtsSynthesizer::generate_placeholder_wav(&nar.text, &full_audio_path)
+                        .await
+                        .unwrap_or(2.5)
+                }
+            };
+
+            let file_size = tokio::fs::metadata(&full_audio_path)
+                .await
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
+
+            let audio_id = register_narration_audio_file(
+                &state.db,
+                &relative_file_path,
+                &format!("解说_{}", idx + 1),
+                duration,
+                file_size,
+            )
+            .await?;
+
+            synthesized.push((nar, audio_id, duration));
+        }
+
+        // 5. 编译解说工程
+        let (timeline, edit_plan) = Self::compile_commentary_timeline(&candidate, &material, &cues, &synthesized);
+
+        // 6. 写入素材 SRT 伴随文件
+        let _ = Self::write_material_srt(&output_dir, &material.file, &timeline).await;
+
+        // 7. 保存解说工程到 projects 表
+        let now = Local::now().to_rfc3339();
+        let project = state
+            .db
+            .add_project(&ProjectRow {
+                id: 0,
+                room_id: candidate.room_id.clone(),
+                platform: candidate.platform.clone(),
+                title: format!("【解说】{}", material.title),
+                note: material.note.clone(),
+                cover: material.cover.clone(),
+                timeline: timeline.to_json(),
+                profile: String::new(),
+                status: 0,
+                bvid: String::new(),
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .await
+            .map_err(|e| format!("保存解说工程失败: {e}"))?;
+
+        // 8. 保存成片记录 automation_outputs
+        let plan_json = serde_json::to_string(&edit_plan).unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(plan_json.as_bytes());
+        let plan_hash = format!("{:x}", hasher.finalize());
+
+        let output_row = AutomationOutputRow {
+            id: format!("out_{}", Uuid::new_v4().simple()),
+            candidate_id: candidate.id.clone(),
+            output_mode: "commentary".to_string(),
+            plan_version: 1,
+            plan_json,
+            plan_hash,
+            project_id: Some(project.id),
+            material_id: Some(material.id),
+            assets_json: "{}".to_string(),
+            render_task_id: None,
+            status: "success".to_string(),
+            error_code: None,
+            error_message: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        state
+            .db
+            .save_automation_output(&output_row)
+            .await
+            .map_err(|e| format!("保存解说版成片记录失败: {e}"))?;
+
+        let _ = state
+            .db
+            .update_candidate_status(&candidate.id, "completed", Some(material.id))
+            .await;
+
+        state.db.notify_change(DataChange::Automation);
+        state.db.notify_change(DataChange::Videos);
+        state.db.notify_change(DataChange::Projects);
+        state.db.notify_change(DataChange::Audio);
 
         Ok((material.id, project.id))
     }
@@ -564,5 +918,77 @@ mod tests {
         assert_eq!(plan.overlays.len(), 1);
         assert_eq!(plan.overlays[0].kind, "title_callout");
         assert!(plan.overlays[0].text.contains("极限反杀"));
+    }
+    #[test]
+    fn test_timeline_v2_commentary_with_audio_track() {
+        let candidate = AutomationCandidateRow {
+            id: "c_comm".into(),
+            run_id: "r_1".into(),
+            platform: "bilibili".into(),
+            room_id: "123".into(),
+            parent_id: "p_1".into(),
+            live_id: "l_1".into(),
+            start_ms: 10_000,
+            end_ms: 30_000,
+            score: 92.0,
+            reason: "极限团战五杀翻盘".into(),
+            status: "pending".into(),
+            content_type: "gaming".into(),
+            confidence: 0.95,
+            manual_modified: false,
+            revision: 0,
+            clip_task_id: None,
+            video_id: None,
+            error_code: None,
+            error_message: None,
+            created_at: "".into(),
+            updated_at: "".into(),
+        };
+
+        let material = VideoRow {
+            id: 103,
+            status: 0,
+            room_id: "123".into(),
+            created_at: "".into(),
+            cover: "".into(),
+            file: "clip_103.mp4".into(),
+            note: "".into(),
+            length: 20,
+            size: 1000,
+            bvid: "".into(),
+            title: "".into(),
+            desc: "".into(),
+            tags: "".into(),
+            area: 0,
+            platform: "bilibili".into(),
+            source: r#"{"ranges":[{"start":10.0,"end":30.0}],"local_offset":0}"#.into(),
+        };
+
+        let narrations = vec![
+            (
+                GeneratedNarration {
+                    text: "注意看！这波团战要开始了。".into(),
+                    start_sec: 0.5,
+                    ducking_volume: 0.25,
+                },
+                501,
+                3.2,
+            ),
+        ];
+
+        let (timeline, plan) = TimelineCompiler::compile_commentary_timeline(&candidate, &material, &[], &narrations);
+
+        assert_eq!(timeline.version, 2);
+        assert_eq!(timeline.audio_tracks.len(), 1);
+        let audio_track = &timeline.audio_tracks[0];
+        assert_eq!(audio_track.items.len(), 1);
+        let item = &audio_track.items[0];
+        assert_eq!(item.duration, 3.2);
+        assert_eq!(item.audio_id(), Some(501));
+
+        assert_eq!(plan.version, 2);
+        assert_eq!(plan.narrations.len(), 1);
+        assert_eq!(plan.narrations[0].audio_asset_id, Some("501".to_string()));
+        assert_eq!(plan.narrations[0].ducking_volume, Some(0.25));
     }
 }

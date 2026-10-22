@@ -1449,6 +1449,7 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::automation::get_automation_outputs,
         crate::handlers::automation::update_automation_candidate,
         crate::handlers::automation::generate_candidate_project,
+        crate::handlers::automation::retry_automation_output,
         crate::handlers::automation::cancel_automation_run,
         crate::agent::agent_chat,
     ])

@@ -86,6 +86,8 @@ pub struct UpdateAutomationCandidateRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GenerateCandidateProjectRequest {
     pub candidate_id: String,
+    #[serde(default)]
+    pub output_mode: Option<String>,
 }
 
 /// 导出候选到工程响应。
@@ -93,6 +95,13 @@ pub struct GenerateCandidateProjectRequest {
 pub struct GenerateCandidateProjectResponse {
     pub material_id: i64,
     pub project_id: i64,
+}
+
+/// 重试单版本成片输出请求参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryAutomationOutputRequest {
+    pub output_id: String,
 }
 
 /// 取消运行请求参数。
@@ -290,7 +299,7 @@ pub async fn update_automation_candidate(
     Ok(updated)
 }
 
-/// 从候选片段自动截取素材并生成 Timeline V1 工程。
+/// 从候选片段自动截取素材并生成对应模式的 Timeline 工程（原声版或解说版）。
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn generate_candidate_project(
     state: state_type!(),
@@ -301,8 +310,43 @@ pub async fn generate_candidate_project(
         return Err("当前处于只读模式，无法创建工程".to_string());
     }
 
-    let (material_id, project_id) =
-        TimelineCompiler::process_candidate_acoustic(&state, &request.candidate_id).await?;
+    let is_commentary = request.output_mode.as_deref() == Some("commentary");
+    let (material_id, project_id) = if is_commentary {
+        TimelineCompiler::process_candidate_commentary(&state, &request.candidate_id).await?
+    } else {
+        TimelineCompiler::process_candidate_acoustic(&state, &request.candidate_id).await?
+    };
+
+    Ok(GenerateCandidateProjectResponse {
+        material_id,
+        project_id,
+    })
+}
+
+/// 重试单版本成片输出。
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn retry_automation_output(
+    state: state_type!(),
+    request: RetryAutomationOutputRequest,
+) -> Result<GenerateCandidateProjectResponse, String> {
+    #[cfg(feature = "headless")]
+    if state.readonly {
+        return Err("当前处于只读模式，无法重试成片输出".to_string());
+    }
+
+    let output = state
+        .db
+        .get_automation_output(&request.output_id)
+        .await
+        .map_err(|e| format!("查询成片输出记录失败: {e}"))?
+        .ok_or_else(|| "成片输出记录不存在".to_string())?;
+
+    let is_commentary = output.output_mode == "commentary";
+    let (material_id, project_id) = if is_commentary {
+        TimelineCompiler::process_candidate_commentary(&state, &output.candidate_id).await?
+    } else {
+        TimelineCompiler::process_candidate_acoustic(&state, &output.candidate_id).await?
+    };
 
     Ok(GenerateCandidateProjectResponse {
         material_id,

@@ -109,13 +109,25 @@ export async function updateAutomationCandidate(
 }
 
 /**
- * 从候选片段生成素材并创建 Timeline V1 工程
+ * 从候选片段生成素材并创建对应版本的 Timeline 工程（原声版或 AI 解说版）
  */
 export async function generateCandidateProject(
-  candidateId: string
+  candidateId: string,
+  outputMode?: "original" | "commentary"
 ): Promise<GenerateCandidateProjectResponse> {
   return invoke<GenerateCandidateProjectResponse>("generate_candidate_project", {
-    request: { candidateId },
+    request: { candidateId, outputMode },
+  });
+}
+
+/**
+ * 重试单版本成片输出
+ */
+export async function retryAutomationOutput(
+  outputId: string
+): Promise<GenerateCandidateProjectResponse> {
+  return invoke<GenerateCandidateProjectResponse>("retry_automation_output", {
+    request: { outputId },
   });
 }
 

@@ -2447,6 +2447,16 @@ async fn handler_generate_candidate_project(
     Ok(Json(ApiResponse::success(res)))
 }
 
+async fn handler_retry_automation_output(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::RetryAutomationOutputRequest>>,
+) -> Result<Json<ApiResponse<crate::handlers::automation::GenerateCandidateProjectResponse>>, ApiError> {
+    let res = crate::handlers::automation::retry_automation_output(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
 async fn handler_cancel_automation_run(
     state: axum::extract::State<State>,
     Json(payload): Json<AutomationPayload<crate::handlers::automation::CancelAutomationRunRequest>>,
@@ -2677,6 +2687,10 @@ pub async fn start_api_server(state: State) {
             .route(
                 "/api/generate_candidate_project",
                 post(handler_generate_candidate_project),
+            )
+            .route(
+                "/api/retry_automation_output",
+                post(handler_retry_automation_output),
             )
             .route(
                 "/api/cancel_automation_run",

@@ -9,6 +9,7 @@
     updateAutomationCandidate,
     generateCandidateProject,
     getAutomationOutputs,
+    retryAutomationOutput,
   } from "../../automation";
   import OutputStatus from "./OutputStatus.svelte";
   import {
@@ -20,6 +21,8 @@
     Loader2,
     Sliders,
     FolderKanban,
+    Mic,
+    RotateCw,
   } from "lucide-svelte";
 
   interface Props {
@@ -109,13 +112,14 @@
   /**
    * 一键从候选片段生成切片工程 (Timeline V1)
    */
-  async function handleGenerateProject() {
+  async function handleGenerateProject(mode: "original" | "commentary" = "original") {
     if (!candidate) return;
     isGenerating = true;
     statusMessage = null;
     try {
-      const res = await generateCandidateProject(candidate.id);
-      statusMessage = { type: "success", text: `切片工程已生成 (工程ID: ${res.project_id})` };
+      const res = await generateCandidateProject(candidate.id, mode);
+      const modeName = mode === "commentary" ? "AI 解说版" : "原声高光版";
+      statusMessage = { type: "success", text: `${modeName}工程已生成 (ID: ${res.project_id})` };
       await loadOutputs(candidate.id);
       onUpdated?.();
       if (onOpenProject) {
@@ -123,6 +127,21 @@
       }
     } catch (e: any) {
       statusMessage = { type: "error", text: "生成工程失败: " + (e?.message || e) };
+    } finally {
+      isGenerating = false;
+    }
+  }
+
+  async function handleRetry(outputId: string) {
+    isGenerating = true;
+    statusMessage = null;
+    try {
+      const res = await retryAutomationOutput(outputId);
+      statusMessage = { type: "success", text: `成片重做完成 (工程ID: ${res.project_id})` };
+      if (candidate) await loadOutputs(candidate.id);
+      onUpdated?.();
+    } catch (e: any) {
+      statusMessage = { type: "error", text: "重做成片失败: " + (e?.message || e) };
     } finally {
       isGenerating = false;
     }
@@ -281,32 +300,64 @@
         一键执行关键帧偏移对齐，生成带有免二次转写伴随字幕的 Timeline V1 工程，可直接在切片编辑器中精剪。
       </p>
 
-      <div class="flex items-center gap-3 pt-2">
+      <div class="flex flex-wrap items-center gap-3 pt-2">
+        <!-- 原声工程生成 -->
         <button
           type="button"
           class="ui-btn ui-btn-sm ui-btn-primary flex items-center gap-1.5"
-          onclick={handleGenerateProject}
+          onclick={() => handleGenerateProject("original")}
           disabled={isGenerating}
         >
           {#if isGenerating}
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
-            <span>生成切片工程中...</span>
+            <span>生成中...</span>
           {:else}
             <Scissors class="h-3.5 w-3.5" />
-            <span>一键生成切片工程</span>
+            <span>生成原声工程</span>
           {/if}
         </button>
 
-        {#if outputs.some((o) => o.project_id)}
-          {#each outputs.filter((o) => o.project_id) as out}
-            <button
-              type="button"
-              class="ui-btn ui-btn-sm flex items-center gap-1"
-              onclick={() => onOpenProject?.(out.project_id!)}
-            >
-              <FolderKanban class="h-3.5 w-3.5 text-accent" />
-              <span>打开已生成工程 (#{out.project_id})</span>
-            </button>
+        <!-- AI 解说工程生成 -->
+        <button
+          type="button"
+          class="ui-btn ui-btn-sm flex items-center gap-1.5 border border-line hover:border-accent text-fg"
+          onclick={() => handleGenerateProject("commentary")}
+          disabled={isGenerating}
+        >
+          <Mic class="h-3.5 w-3.5 text-accent" />
+          <span>生成 AI 解说工程</span>
+        </button>
+
+        <!-- 已生成工程快速打开与重做 -->
+        {#if outputs.length > 0}
+          {#each outputs as out}
+            <div class="inline-flex items-center gap-1 bg-control rounded px-2 py-1 text-xs">
+              <span class="text-fg-muted font-medium">
+                {out.output_mode === "commentary" ? "解说版" : "原声版"}:
+              </span>
+              {#if out.project_id}
+                <button
+                  type="button"
+                  class="text-accent hover:underline inline-flex items-center gap-0.5"
+                  onclick={() => onOpenProject?.(out.project_id!)}
+                  title="打开工程"
+                >
+                  <FolderKanban class="h-3 w-3" />
+                  <span>#{out.project_id}</span>
+                </button>
+              {:else}
+                <span class="text-fg-muted">{out.status}</span>
+              {/if}
+              <button
+                type="button"
+                class="ml-1 text-fg-muted hover:text-fg"
+                title="重新生成此版本"
+                onclick={() => handleRetry(out.id)}
+                disabled={isGenerating}
+              >
+                <RotateCw class="h-3 w-3" />
+              </button>
+            </div>
           {/each}
         {/if}
       </div>
