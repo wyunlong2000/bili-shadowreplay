@@ -1441,6 +1441,15 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::video_editing::search_danmu_keywords,
         crate::handlers::video_editing::merge_videos,
         crate::handlers::video_editing::extract_video_audio,
+        crate::handlers::automation::get_automation_policy,
+        crate::handlers::automation::save_automation_policy,
+        crate::handlers::automation::start_automation_analysis,
+        crate::handlers::automation::get_automation_runs,
+        crate::handlers::automation::get_automation_candidates,
+        crate::handlers::automation::get_automation_outputs,
+        crate::handlers::automation::update_automation_candidate,
+        crate::handlers::automation::generate_candidate_project,
+        crate::handlers::automation::cancel_automation_run,
         crate::agent::agent_chat,
     ])
 }

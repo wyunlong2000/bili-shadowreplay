@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod compiler;
 pub mod evidence;
 pub mod policy;
 pub mod scheduler;
@@ -7,6 +8,7 @@ pub mod source;
 pub mod types;
 
 pub use analysis::run_analysis_pipeline;
+pub use compiler::TimelineCompiler;
 pub use evidence::{EvidenceCue, EvidenceIndex};
 pub use policy::{AutoClippingPolicy, RoomPolicyOverride};
 pub use scheduler::AutomationService;

@@ -677,6 +677,11 @@ export interface AutomationCandidateItem {
   updated_at: string;
 }
 
+export type AutoClippingPolicy = AutoClippingConfig;
+export type AutomationCandidateRow = AutomationCandidateItem;
+export type AutomationRunRow = AutomationRunItem;
+export type AutomationOutputRow = AutomationOutputItem;
+
 export interface AutomationRunItem {
   id: string;
   platform: string;

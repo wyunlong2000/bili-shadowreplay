@@ -1,5 +1,6 @@
 pub mod account;
 pub mod audio;
+pub mod automation;
 pub mod config;
 #[cfg(feature = "gui")]
 pub mod events;

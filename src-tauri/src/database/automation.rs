@@ -192,6 +192,61 @@ impl Database {
         Ok(row)
     }
 
+    /// 查询场次运行记录列表（支持按平台与房间筛选）。
+    pub async fn get_automation_runs(
+        &self,
+        platform: Option<&str>,
+        room_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AutomationRunRow>, DatabaseError> {
+        let limit = limit.clamp(1, 100);
+        let rows = match (platform, room_id) {
+            (Some(p), Some(r)) => {
+                sqlx::query_as::<Sqlite, AutomationRunRow>(
+                    r#"
+                    SELECT * FROM automation_runs
+                    WHERE platform = $1 AND room_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(p)
+                .bind(r)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(p), None) => {
+                sqlx::query_as::<Sqlite, AutomationRunRow>(
+                    r#"
+                    SELECT * FROM automation_runs
+                    WHERE platform = $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(p)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            _ => {
+                sqlx::query_as::<Sqlite, AutomationRunRow>(
+                    r#"
+                    SELECT * FROM automation_runs
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+
+        Ok(rows)
+    }
+
     /// 获取某场次当前正在运行中的任务（非终态）。
     pub async fn get_active_automation_run(
         &self,
@@ -489,6 +544,49 @@ impl Database {
         .await?;
 
         Ok(res.rows_affected() > 0)
+    }
+
+    /// 查询单个候选高光片段。
+    pub async fn get_automation_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<AutomationCandidateRow>, DatabaseError> {
+        let row = sqlx::query_as::<Sqlite, AutomationCandidateRow>(
+            r#"
+            SELECT * FROM automation_candidates
+            WHERE id = $1
+            "#,
+        )
+        .bind(candidate_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// 更新候选片段的处理状态与关联素材 ID。
+    pub async fn update_candidate_status(
+        &self,
+        candidate_id: &str,
+        status: &str,
+        video_id: Option<i64>,
+    ) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            UPDATE automation_candidates
+            SET status = $1, video_id = $2, updated_at = $3
+            WHERE id = $4
+            "#,
+        )
+        .bind(status)
+        .bind(video_id)
+        .bind(&now)
+        .bind(candidate_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// 保存或更新单版本成片输出记录。

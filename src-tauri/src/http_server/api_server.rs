@@ -2351,6 +2351,112 @@ async fn handler_hls(
     Ok(response)
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AutomationPayload<T> {
+    Nested { request: T },
+    Direct(T),
+}
+
+impl<T> AutomationPayload<T> {
+    fn into_inner(self) -> T {
+        match self {
+            Self::Nested { request } => request,
+            Self::Direct(inner) => inner,
+        }
+    }
+}
+
+async fn handler_get_automation_policy(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::GetAutomationPolicyRequest>>,
+) -> Result<Json<ApiResponse<crate::handlers::automation::GetAutomationPolicyResponse>>, ApiError> {
+    let res = crate::handlers::automation::get_automation_policy(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_save_automation_policy(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::SaveAutomationPolicyRequest>>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    crate::handlers::automation::save_automation_policy(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(())))
+}
+
+async fn handler_start_automation_analysis(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::StartAutomationAnalysisRequest>>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let res = crate::handlers::automation::start_automation_analysis(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_get_automation_runs(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::GetAutomationRunsRequest>>,
+) -> Result<Json<ApiResponse<Vec<crate::automation::AutomationRunRow>>>, ApiError> {
+    let res = crate::handlers::automation::get_automation_runs(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_get_automation_candidates(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::GetAutomationCandidatesRequest>>,
+) -> Result<Json<ApiResponse<Vec<crate::automation::AutomationCandidateRow>>>, ApiError> {
+    let res = crate::handlers::automation::get_automation_candidates(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_get_automation_outputs(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::GetAutomationOutputsRequest>>,
+) -> Result<Json<ApiResponse<Vec<crate::automation::AutomationOutputRow>>>, ApiError> {
+    let res = crate::handlers::automation::get_automation_outputs(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_update_automation_candidate(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::UpdateAutomationCandidateRequest>>,
+) -> Result<Json<ApiResponse<bool>>, ApiError> {
+    let res = crate::handlers::automation::update_automation_candidate(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_generate_candidate_project(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::GenerateCandidateProjectRequest>>,
+) -> Result<Json<ApiResponse<crate::handlers::automation::GenerateCandidateProjectResponse>>, ApiError> {
+    let res = crate::handlers::automation::generate_candidate_project(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(res)))
+}
+
+async fn handler_cancel_automation_run(
+    state: axum::extract::State<State>,
+    Json(payload): Json<AutomationPayload<crate::handlers::automation::CancelAutomationRunRequest>>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    crate::handlers::automation::cancel_automation_run(state.0, payload.into_inner())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::success(())))
+}
+
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024;
 
 pub async fn start_api_server(state: State) {
@@ -2555,6 +2661,26 @@ pub async fn start_api_server(state: State) {
             .route(
                 "/api/upload_and_import_files",
                 post(handler_upload_and_import_files),
+            )
+            .route(
+                "/api/save_automation_policy",
+                post(handler_save_automation_policy),
+            )
+            .route(
+                "/api/start_automation_analysis",
+                post(handler_start_automation_analysis),
+            )
+            .route(
+                "/api/update_automation_candidate",
+                post(handler_update_automation_candidate),
+            )
+            .route(
+                "/api/generate_candidate_project",
+                post(handler_generate_candidate_project),
+            )
+            .route(
+                "/api/cancel_automation_run",
+                post(handler_cancel_automation_run),
             );
     } else {
         log::info!("Running in readonly mode, some api routes are disabled");
@@ -2652,6 +2778,22 @@ pub async fn start_api_server(state: State) {
         .route("/api/fetch", post(handler_fetch))
         .route("/api/upload_file", post(handler_upload_file))
         .route("/api/agent_chat", post(handler_agent_chat))
+        .route(
+            "/api/get_automation_policy",
+            post(handler_get_automation_policy),
+        )
+        .route(
+            "/api/get_automation_runs",
+            post(handler_get_automation_runs),
+        )
+        .route(
+            "/api/get_automation_candidates",
+            post(handler_get_automation_candidates),
+        )
+        .route(
+            "/api/get_automation_outputs",
+            post(handler_get_automation_outputs),
+        )
         .route("/api/image/:video_id", get(handler_image_base64))
         .route("/hls/*uri", get(handler_hls));
 
