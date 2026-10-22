@@ -87,7 +87,7 @@ impl TimelineCompiler {
 
         let edit_plan = EditPlan {
             version: 1,
-            output_mode: super::types::AutomationOutputMode::Acoustic,
+            output_mode: super::types::AutomationOutputMode::Original,
             title: candidate.reason.clone(),
             clips: vec![EditPlanClip {
                 id: clip_id,
@@ -221,7 +221,7 @@ impl TimelineCompiler {
 
         let edit_plan = EditPlan {
             version: 2,
-            output_mode: super::types::AutomationOutputMode::Acoustic,
+            output_mode: super::types::AutomationOutputMode::Original,
             title: candidate.reason.clone(),
             clips: vec![EditPlanClip {
                 id: clip_id.clone(),
@@ -282,16 +282,20 @@ impl TimelineCompiler {
         let req_end_sec = (candidate.end_ms as f64) / 1000.0;
 
         let params = crate::recorder_manager::ClipRangeParams {
+            title: format!("{}_{}", candidate.content_type, candidate.reason),
+            note: format!("自动切片高光（评分: {}）", candidate.score),
+            cover: String::new(),
+            platform: candidate.platform.clone(),
             room_id: candidate.room_id.clone(),
             live_id: candidate.live_id.clone(),
             ranges: vec![crate::ffmpeg::Range {
                 start: req_start_sec,
                 end: req_end_sec,
             }],
+            danmu: true,
             local_offset: 0,
-            title: format!("{}_{}", candidate.content_type, candidate.reason),
-            note: format!("自动切片高光（评分: {}）", candidate.score),
-            cover: String::new(),
+            fix_encoding: false,
+            transition: None,
         };
 
         // 创建临时 ProgressReporter
@@ -600,22 +604,41 @@ impl TimelineCompiler {
         let req_start_sec = (candidate.start_ms as f64) / 1000.0;
         let req_end_sec = (candidate.end_ms as f64) / 1000.0;
 
-        let params = crate::handlers::video::ClipRangeParams {
+        let params = crate::recorder_manager::ClipRangeParams {
+            title: format!("解说高光_{}", &candidate.id[..candidate.id.len().min(8)]),
+            note: format!("AI解说: {}", candidate.reason),
+            cover: String::new(),
             platform: candidate.platform.clone(),
             room_id: candidate.room_id.clone(),
-            parent_id: candidate.parent_id.clone(),
             live_id: candidate.live_id.clone(),
-            ranges: vec![crate::handlers::video::ClipRange {
+            ranges: vec![crate::ffmpeg::Range {
                 start: req_start_sec,
                 end: req_end_sec,
             }],
-            title: format!("解说高光_{}", &candidate.id[..candidate.id.len().min(8)]),
-            note: format!("AI解说: {}", candidate.reason),
-            create_project: false,
-            auto_subtitle: false,
+            danmu: true,
+            local_offset: 0,
+            fix_encoding: false,
+            transition: None,
         };
 
-        let reporter = crate::task::TaskReporter::new("auto_clip_commentary", &state.db);
+        let task = state
+            .db
+            .generate_task(
+                "auto_clip_commentary_material",
+                "processing",
+                &serde_json::to_string(&params).unwrap_or_default(),
+            )
+            .await
+            .map_err(|e| format!("创建任务记录失败: {e}"))?;
+
+        let reporter = crate::progress::progress_reporter::ProgressReporter::new(
+            state.db.clone(),
+            &state.events,
+            &task.id,
+        )
+        .await
+        .map_err(|e| format!("创建进度报告器失败: {e}"))?;
+
         let material = crate::handlers::video::create_material(state, &reporter, &params).await?;
 
         // 2. 证据字幕

@@ -170,22 +170,18 @@ pub async fn save_automation_policy(
         let room_override = RoomPolicyOverride {
             enabled: Some(request.policy.enabled),
             content_type: Some(request.policy.content_type),
+            auto_classify: Some(request.policy.auto_classify),
             output_mode: Some(request.policy.output_mode),
             max_candidates: Some(request.policy.max_candidates),
-            min_score: Some(request.policy.min_score),
         };
         let policy_json = serde_json::to_string(&room_override).unwrap_or_default();
-        let expected_revision = request.expected_revision.unwrap_or(0);
+        let expected_revision = request.expected_revision;
 
-        let saved = state
+        state
             .db
             .save_room_automation_policy(&platform, &room_id, &policy_json, expected_revision)
             .await
             .map_err(|e| format!("保存房间策略失败: {e}"))?;
-
-        if !saved {
-            return Err("策略版本冲突，请刷新后重试".to_string());
-        }
     } else {
         let mut cfg = state.config.write().await;
         cfg.auto_clipping.enabled = request.policy.enabled;

@@ -248,8 +248,8 @@ pub async fn run_analysis_pipeline(
 
     let windows = compute_sliding_windows(
         evidence_index.total_duration_ms,
-        policy.window_seconds,
-        policy.overlap_seconds,
+        policy.window_seconds as i64,
+        policy.overlap_seconds as i64,
     );
     let total_windows = windows.len() as i64;
 
@@ -276,7 +276,7 @@ pub async fn run_analysis_pipeline(
             status: "completed".to_string(),
             stage: "analyzed".to_string(),
             processed_until_ms: win.end_ms,
-            window_seconds: policy.window_seconds,
+            window_seconds: policy.window_seconds as i64,
             subtitle_json: None,
             checkpoints_json: Some(checkpoints_json),
             input_hash: String::new(),

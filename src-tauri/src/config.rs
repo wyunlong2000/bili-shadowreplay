@@ -251,6 +251,7 @@ impl Config {
             danmu_ass_options: default_danmu_ass_options(),
             update_interval: Arc::new(AtomicU64::new(default_status_check_interval())),
             llm: default_llm_config(),
+            auto_clipping: default_auto_clipping_config(),
             mcp_enabled: false,
             mcp_port: default_mcp_port(),
         };

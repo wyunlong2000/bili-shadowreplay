@@ -9,6 +9,7 @@ mod constants;
 mod danmu2ass;
 mod database;
 mod events;
+mod feedback;
 mod ffmpeg;
 mod handlers;
 #[cfg(feature = "headless")]
@@ -17,9 +18,11 @@ mod material;
 mod mcp;
 mod migration;
 mod powerlive;
+mod preview_audio;
 mod progress;
 mod project;
 mod recorder_manager;
+mod safe_path;
 mod state;
 #[cfg(feature = "gui")]
 mod static_server;

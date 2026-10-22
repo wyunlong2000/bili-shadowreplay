@@ -17,6 +17,19 @@ pub enum LiveContentType {
 }
 
 impl LiveContentType {
+    /// 返回内容类型的英文标识字符串。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Knowledge => "knowledge",
+            Self::Gaming => "gaming",
+            Self::Sports => "sports",
+            Self::Commerce => "commerce",
+            Self::Mixed => "mixed",
+            Self::Other => "other",
+        }
+    }
+
     /// 返回内容类型的中文可读名称。
     pub fn label(&self) -> &'static str {
         match self {

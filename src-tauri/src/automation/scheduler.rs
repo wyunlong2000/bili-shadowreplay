@@ -61,9 +61,9 @@ impl AutomationService {
         let handle = tokio::spawn(async move {
             this.run_loop().await;
         });
-        let worker_mutex = self.worker_handle.clone();
+        let this2 = self.clone();
         tokio::spawn(async move {
-            let mut lock = worker_mutex.lock().await;
+            let mut lock = this2.worker_handle.lock().await;
             *lock = Some(handle);
         });
     }
@@ -266,7 +266,7 @@ impl AutomationService {
             .ok_or_else(|| "自动化任务不存在".to_string())?;
 
         if let Some(ref tid) = run.task_id {
-            let _ = self.task_manager.cancel(tid);
+            let _ = self.task_manager.cancel_task(tid);
         }
 
         self.db
