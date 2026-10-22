@@ -44,12 +44,15 @@ impl TimelineCompiler {
         let clip_out_sec = clip_in_sec + req_duration_sec;
         let clip_id = format!("clip_{}", Uuid::new_v4().simple());
 
+        let has_narrations = !synthesized_narrations.is_empty();
+        let clip_volume = if has_narrations { 0.25 } else { 1.0 };
+
         let clip = TimelineClip {
             id: clip_id.clone(),
             material_id: material.id,
             start: clip_in_sec,
             end: clip_out_sec,
-            volume: 1.0,
+            volume: clip_volume,
         };
 
         // 依据字幕时间校准：material_time = source_time - actual_start
@@ -318,7 +321,18 @@ impl TimelineCompiler {
         .map_err(|e| format!("创建进度报告器失败: {e}"))?;
 
         // 2. 调用已有的 create_material（流复制截取）
-        let material = crate::handlers::video::create_material(state, &reporter, &params).await?;
+        let material = match crate::handlers::video::create_material(state, &reporter, &params).await {
+            Ok(mat) => {
+                reporter.finish(true, "切片素材截取完成").await;
+                let _ = state.db.update_task(&task.id, "success", "切片素材截取完成", None).await;
+                mat
+            }
+            Err(e) => {
+                reporter.finish(false, &format!("切片素材截取失败: {e}")).await;
+                let _ = state.db.update_task(&task.id, "failed", &format!("切片素材截取失败: {e}"), None).await;
+                return Err(e);
+            }
+        };
 
         // 3. 构建证据索引并提取落入该区间的字幕
         let manifest_res = super::source::SourceManifest::build(
@@ -341,7 +355,22 @@ impl TimelineCompiler {
         .await
         .unwrap_or_default();
 
-        let cues = evidence_index.cues_in_range(candidate.start_ms, candidate.end_ms);
+        let seg_offset = manifest_items
+            .iter()
+            .find(|item| item.live_id == candidate.live_id)
+            .map(|item| item.start_time_ms)
+            .unwrap_or(0);
+        let global_start = candidate.start_ms + seg_offset;
+        let global_end = candidate.end_ms + seg_offset;
+        let raw_cues = evidence_index.cues_in_range(global_start, global_end);
+        let cues: Vec<EvidenceCue> = raw_cues
+            .into_iter()
+            .map(|mut cue| {
+                cue.start_ms -= seg_offset;
+                cue.end_ms -= seg_offset;
+                cue
+            })
+            .collect();
 
         // 4. 编译校准后的 Timeline V1 与 EditPlan
         let (timeline, edit_plan) = Self::compile_timeline_v2(&candidate, &material, &cues);
@@ -639,7 +668,18 @@ impl TimelineCompiler {
         .await
         .map_err(|e| format!("创建进度报告器失败: {e}"))?;
 
-        let material = crate::handlers::video::create_material(state, &reporter, &params).await?;
+        let material = match crate::handlers::video::create_material(state, &reporter, &params).await {
+            Ok(mat) => {
+                reporter.finish(true, "解说素材截取完成").await;
+                let _ = state.db.update_task(&task.id, "success", "解说素材截取完成", None).await;
+                mat
+            }
+            Err(e) => {
+                reporter.finish(false, &format!("解说素材截取失败: {e}")).await;
+                let _ = state.db.update_task(&task.id, "failed", &format!("解说素材截取失败: {e}"), None).await;
+                return Err(e);
+            }
+        };
 
         // 2. 证据字幕
         let manifest_res = super::source::SourceManifest::build(
@@ -662,7 +702,22 @@ impl TimelineCompiler {
         .await
         .unwrap_or_default();
 
-        let cues = evidence_index.cues_in_range(candidate.start_ms, candidate.end_ms);
+        let seg_offset = manifest_items
+            .iter()
+            .find(|item| item.live_id == candidate.live_id)
+            .map(|item| item.start_time_ms)
+            .unwrap_or(0);
+        let global_start = candidate.start_ms + seg_offset;
+        let global_end = candidate.end_ms + seg_offset;
+        let raw_cues = evidence_index.cues_in_range(global_start, global_end);
+        let cues: Vec<EvidenceCue> = raw_cues
+            .into_iter()
+            .map(|mut cue| {
+                cue.start_ms -= seg_offset;
+                cue.end_ms -= seg_offset;
+                cue
+            })
+            .collect();
         let clip_duration_sec = req_end_sec - req_start_sec;
 
         // 3. 规划解说文案
@@ -847,7 +902,9 @@ mod tests {
             tags: "".into(),
             area: 0,
             platform: "bilibili".into(),
+            live_id: "l_1".into(),
             source: r#"{"ranges":[{"start":8.5,"end":40.0}],"local_offset":0}"#.into(),
+            duration: 31.5,
         };
 
         // 字幕在录播全局时间 12.0s ~ 15.0s
@@ -893,15 +950,17 @@ mod tests {
             start_ms: 10_000,
             end_ms: 30_000,
             score: 88.0,
+            signals_json: "{}".into(),
             reason: "极限反杀连环双杀".into(),
             status: "pending".into(),
             content_type: "gaming".into(),
             confidence: 0.9,
-            manual_modified: false,
+            evidence_json: "{}".into(),
+            manual_modified: 0,
             revision: 0,
             clip_task_id: None,
             video_id: None,
-            error_code: None,
+            notify_status: "none".into(),
             error_message: None,
             created_at: "".into(),
             updated_at: "".into(),
@@ -923,7 +982,9 @@ mod tests {
             tags: "".into(),
             area: 0,
             platform: "bilibili".into(),
+            live_id: "l_1".into(),
             source: r#"{"ranges":[{"start":10.0,"end":30.0}],"local_offset":0}"#.into(),
+            duration: 20.0,
         };
 
         let (timeline, plan) = TimelineCompiler::compile_timeline_v2(&candidate, &material, &[]);
@@ -954,15 +1015,17 @@ mod tests {
             start_ms: 10_000,
             end_ms: 30_000,
             score: 92.0,
+            signals_json: "{}".into(),
             reason: "极限团战五杀翻盘".into(),
             status: "pending".into(),
             content_type: "gaming".into(),
             confidence: 0.95,
-            manual_modified: false,
+            evidence_json: "{}".into(),
+            manual_modified: 0,
             revision: 0,
             clip_task_id: None,
             video_id: None,
-            error_code: None,
+            notify_status: "none".into(),
             error_message: None,
             created_at: "".into(),
             updated_at: "".into(),
@@ -984,7 +1047,9 @@ mod tests {
             tags: "".into(),
             area: 0,
             platform: "bilibili".into(),
+            live_id: "l_1".into(),
             source: r#"{"ranges":[{"start":10.0,"end":30.0}],"local_offset":0}"#.into(),
+            duration: 20.0,
         };
 
         let narrations = vec![
@@ -1002,6 +1067,7 @@ mod tests {
         let (timeline, plan) = TimelineCompiler::compile_commentary_timeline(&candidate, &material, &[], &narrations);
 
         assert_eq!(timeline.version, 2);
+        assert_eq!(timeline.clips[0].volume, 0.25);
         assert_eq!(timeline.audio_tracks.len(), 1);
         let audio_track = &timeline.audio_tracks[0];
         assert_eq!(audio_track.items.len(), 1);

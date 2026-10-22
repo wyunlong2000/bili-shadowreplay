@@ -87,8 +87,9 @@
     <div class="mt-4 pt-4 border-t border-line space-y-4">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label class="block text-sm font-medium mb-1">默认直播内容类型</label>
+          <label for="auto-settings-content-type" class="block text-sm font-medium mb-1">默认直播内容类型</label>
           <select
+            id="auto-settings-content-type"
             class="w-full bg-surface border border-line rounded px-3 py-1.5 text-sm"
             bind:value={policy.content_type}
             onchange={handleSave}
@@ -100,8 +101,9 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium mb-1">成片生成版本</label>
+          <label for="auto-settings-output-mode" class="block text-sm font-medium mb-1">成片生成版本</label>
           <select
+            id="auto-settings-output-mode"
             class="w-full bg-surface border border-line rounded px-3 py-1.5 text-sm"
             bind:value={policy.output_mode}
             onchange={handleSave}
@@ -113,8 +115,9 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium mb-1">单场最多候选数</label>
+          <label for="auto-settings-max-candidates" class="block text-sm font-medium mb-1">单场最多候选数</label>
           <input
+            id="auto-settings-max-candidates"
             type="number"
             min="1"
             max="20"
@@ -125,8 +128,9 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium mb-1">最低采纳评分 (0 - 100)</label>
+          <label for="auto-settings-min-score" class="block text-sm font-medium mb-1">最低采纳评分 (0 - 100)</label>
           <input
+            id="auto-settings-min-score"
             type="number"
             min="0"
             max="100"
@@ -161,8 +165,9 @@
       {#if showAdvanced}
         <div class="bg-surface/50 p-3 rounded border border-line grid grid-cols-2 gap-4 text-xs">
           <div>
-            <label class="block font-medium mb-1">滑窗大小 (秒)</label>
+            <label for="auto-settings-window-seconds" class="block font-medium mb-1">滑窗大小 (秒)</label>
             <input
+              id="auto-settings-window-seconds"
               type="number"
               min="60"
               max="1800"
@@ -174,8 +179,9 @@
             <span class="text-secondary opacity-75">推荐 300 秒</span>
           </div>
           <div>
-            <label class="block font-medium mb-1">窗口重叠 (秒)</label>
+            <label for="auto-settings-overlap-seconds" class="block font-medium mb-1">窗口重叠 (秒)</label>
             <input
+              id="auto-settings-overlap-seconds"
               type="number"
               min="10"
               max="300"

@@ -18,7 +18,7 @@ impl Database {
     ) -> Result<Vec<RecordRow>, DatabaseError> {
         let rows = sqlx::query_as::<Sqlite, RecordRow>(
             r#"
-            SELECT live_id, platform, room_id, title, length, size, cover, created_at
+            SELECT live_id, platform, room_id, title, length, size, cover, created_at, parent_id
             FROM records
             WHERE platform = $1 AND room_id = $2 AND (live_id = $3 OR parent_id = $3)
             ORDER BY created_at ASC
@@ -34,6 +34,26 @@ impl Database {
     }
 
     /// 查询指定房间的自动化覆盖策略。
+        /// 删除房间的自动化覆盖策略，使其恢复继承全局默认策略。
+    pub async fn delete_room_automation_policy(
+        &self,
+        platform: &str,
+        room_id: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            DELETE FROM automation_room_policies
+            WHERE platform = $1 AND room_id = $2
+            "#,
+        )
+        .bind(platform)
+        .bind(room_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn get_room_automation_policy(
         &self,
         platform: &str,
@@ -342,7 +362,9 @@ impl Database {
         sqlx::query(
             r#"
             UPDATE automation_runs
-            SET status = $1, stage = $2, error_code = $3, error_message = $4, updated_at = $5
+            SET status = $1, stage = $2, error_code = $3, error_message = $4, updated_at = $5,
+                lease_owner = CASE WHEN $1 IN ('success', 'failed', 'cancelled') THEN NULL ELSE lease_owner END,
+                lease_expires_at = CASE WHEN $1 IN ('success', 'failed', 'cancelled') THEN NULL ELSE lease_expires_at END
             WHERE id = $6
             "#,
         )

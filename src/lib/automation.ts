@@ -37,10 +37,11 @@ export async function saveAutomationPolicy(
   policy: AutoClippingPolicy,
   platform?: string,
   roomId?: string,
-  expectedRevision?: number
+  expectedRevision?: number,
+  clearOverride?: boolean
 ): Promise<void> {
   return invoke<void>("save_automation_policy", {
-    request: { policy, platform, roomId, expectedRevision },
+    request: { policy, platform, roomId, expectedRevision, clearOverride },
   });
 }
 

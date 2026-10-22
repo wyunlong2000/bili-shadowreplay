@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::policy::AutoClippingPolicy;
-use super::types::{AutomationCandidateRow, CandidateEvidence};
+use super::types::{AutomationCandidateRow, CandidateEvidence, SourceManifestItem};
 
 /// 原始模型或启发式分析返回的高光片段描述。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +34,7 @@ impl CandidateRanker {
         room_id: &str,
         parent_id: &str,
         live_id: &str,
+        manifest_items: &[SourceManifestItem],
     ) -> Vec<AutomationCandidateRow> {
         // 1. 过滤掉不合法区间和低于最低阈值的候选
         raw_candidates.retain(|c| {
@@ -112,15 +113,28 @@ impl CandidateRanker {
                 let evidence_json =
                     serde_json::to_string(&evidence).unwrap_or_else(|_| "{}".to_string());
 
+                let (target_live_id, rel_start_ms, rel_end_ms) = if !manifest_items.is_empty() {
+                    let seg = manifest_items
+                        .iter()
+                        .find(|item| c.start_ms >= item.start_time_ms && c.start_ms < item.start_time_ms + item.duration_ms)
+                        .or_else(|| manifest_items.last())
+                        .unwrap();
+                    let s = (c.start_ms - seg.start_time_ms).max(0);
+                    let e = (c.end_ms - seg.start_time_ms).min(seg.duration_ms).max(s + 1000);
+                    (seg.live_id.clone(), s, e)
+                } else {
+                    (live_id.to_string(), c.start_ms, c.end_ms)
+                };
+
                 AutomationCandidateRow {
                     id,
                     run_id: run_id.to_string(),
                     platform: platform.to_string(),
                     room_id: room_id.to_string(),
                     parent_id: parent_id.to_string(),
-                    live_id: live_id.to_string(),
-                    start_ms: c.start_ms,
-                    end_ms: c.end_ms,
+                    live_id: target_live_id,
+                    start_ms: rel_start_ms,
+                    end_ms: rel_end_ms,
                     score: c.score,
                     signals_json: "{}".to_string(),
                     reason: c.reason,
@@ -210,7 +224,7 @@ mod tests {
         // 应该只有 2 个（因为 max_candidates = 2，且两个反杀已合并，低分淘汰被过滤）
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].score, 90.0);
-        assert_eq!(ranked[0].title, "精彩反杀高分");
+        assert_eq!(ranked[0].reason, "精彩反杀高分");
         assert_eq!(ranked[0].start_ms, 10_000);
         assert_eq!(ranked[0].end_ms, 45_000);
 
@@ -219,6 +233,6 @@ mod tests {
         assert_eq!(evidence.cue_ids, vec!["cue_0001", "cue_0002"]);
 
         assert_eq!(ranked[1].score, 80.0);
-        assert_eq!(ranked[1].title, "独立看点");
+        assert_eq!(ranked[1].reason, "独立看点");
     }
 }

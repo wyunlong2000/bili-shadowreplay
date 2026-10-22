@@ -67,10 +67,9 @@
     error = "";
     try {
       if (!isOverride) {
-        // 如果取消覆盖，可以保存一个继承或默认配置
-        await saveAutomationPolicy(policy, platform, roomId, revision);
+        await saveAutomationPolicy(policy, platform, roomId, revision, true);
       } else {
-        await saveAutomationPolicy(policy, platform, roomId, revision);
+        await saveAutomationPolicy(policy, platform, roomId, revision, false);
       }
       onClose();
     } catch (e: any) {
@@ -146,8 +145,9 @@
               </div>
 
               <div>
-                <label class="block text-xs font-medium mb-1">主要内容类型</label>
+                <label for="room-auto-content-type" class="block text-xs font-medium mb-1">主要内容类型</label>
                 <select
+                  id="room-auto-content-type"
                   class="w-full bg-surface border border-line rounded px-3 py-1.5 text-xs"
                   bind:value={policy.content_type}
                 >
@@ -158,8 +158,9 @@
               </div>
 
               <div>
-                <label class="block text-xs font-medium mb-1">输出成片版本</label>
+                <label for="room-auto-output-mode" class="block text-xs font-medium mb-1">输出成片版本</label>
                 <select
+                  id="room-auto-output-mode"
                   class="w-full bg-surface border border-line rounded px-3 py-1.5 text-xs"
                   bind:value={policy.output_mode}
                 >
@@ -171,8 +172,9 @@
 
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label class="block text-xs font-medium mb-1">单场最大候选</label>
+                  <label for="room-auto-max-candidates" class="block text-xs font-medium mb-1">单场最大候选</label>
                   <input
+                    id="room-auto-max-candidates"
                     type="number"
                     min="1"
                     max="20"
@@ -181,8 +183,9 @@
                   />
                 </div>
                 <div>
-                  <label class="block text-xs font-medium mb-1">最低采纳分数</label>
+                  <label for="room-auto-min-score" class="block text-xs font-medium mb-1">最低采纳分数</label>
                   <input
+                    id="room-auto-min-score"
                     type="number"
                     min="0"
                     max="100"

@@ -34,7 +34,7 @@ impl Default for AutoClippingPolicy {
             window_seconds: 300,
             overlap_seconds: 30,
             max_candidates: 5,
-            min_score: 6.0,
+            min_score: 60.0,
         }
     }
 }
@@ -47,6 +47,7 @@ pub struct RoomPolicyOverride {
     pub auto_classify: Option<bool>,
     pub output_mode: Option<ClipOutputMode>,
     pub max_candidates: Option<usize>,
+    pub min_score: Option<f64>,
 }
 
 impl AutoClippingPolicy {
@@ -64,7 +65,7 @@ impl AutoClippingPolicy {
             window_seconds: self.window_seconds,
             overlap_seconds: self.overlap_seconds,
             max_candidates: overrides.max_candidates.unwrap_or(self.max_candidates),
-            min_score: self.min_score,
+            min_score: overrides.min_score.unwrap_or(self.min_score),
         }
     }
 

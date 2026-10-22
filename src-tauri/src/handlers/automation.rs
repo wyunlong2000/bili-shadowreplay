@@ -35,6 +35,8 @@ pub struct SaveAutomationPolicyRequest {
     pub room_id: Option<String>,
     pub expected_revision: Option<i64>,
     pub policy: AutoClippingPolicy,
+    #[serde(default)]
+    pub clear_override: Option<bool>,
 }
 
 /// 发起场次自动化分析请求参数。
@@ -166,22 +168,33 @@ pub async fn save_automation_policy(
         return Err("当前处于只读模式，无法修改策略".to_string());
     }
 
-    if let (Some(platform), Some(room_id)) = (request.platform, request.room_id) {
-        let room_override = RoomPolicyOverride {
-            enabled: Some(request.policy.enabled),
-            content_type: Some(request.policy.content_type),
-            auto_classify: Some(request.policy.auto_classify),
-            output_mode: Some(request.policy.output_mode),
-            max_candidates: Some(request.policy.max_candidates),
-        };
-        let policy_json = serde_json::to_string(&room_override).unwrap_or_default();
-        let expected_revision = request.expected_revision;
+    request.policy.validate()?;
 
-        state
-            .db
-            .save_room_automation_policy(&platform, &room_id, &policy_json, expected_revision)
-            .await
-            .map_err(|e| format!("保存房间策略失败: {e}"))?;
+    if let (Some(platform), Some(room_id)) = (request.platform, request.room_id) {
+        if request.clear_override.unwrap_or(false) {
+            state
+                .db
+                .delete_room_automation_policy(&platform, &room_id)
+                .await
+                .map_err(|e| format!("清除房间策略失败: {e}"))?;
+        } else {
+            let room_override = RoomPolicyOverride {
+                enabled: Some(request.policy.enabled),
+                content_type: Some(request.policy.content_type),
+                auto_classify: Some(request.policy.auto_classify),
+                output_mode: Some(request.policy.output_mode),
+                max_candidates: Some(request.policy.max_candidates),
+                min_score: Some(request.policy.min_score),
+            };
+            let policy_json = serde_json::to_string(&room_override).unwrap_or_default();
+            let expected_revision = request.expected_revision;
+
+            state
+                .db
+                .save_room_automation_policy(&platform, &room_id, &policy_json, expected_revision)
+                .await
+                .map_err(|e| format!("保存房间策略失败: {e}"))?;
+        }
     } else {
         let mut cfg = state.config.write().await;
         cfg.auto_clipping.enabled = request.policy.enabled;

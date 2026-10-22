@@ -19,6 +19,7 @@
   function getStatusBadge(status?: string) {
     switch (status) {
       case "completed":
+      case "success":
         return { label: "已就绪", color: "bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20" };
       case "processing":
       case "synthesizing":
@@ -37,7 +38,7 @@
 <div class="flex flex-wrap items-center gap-2 text-xs">
   <!-- 原声版状态 -->
   <div class="flex items-center gap-1.5 rounded border px-2 py-1 {getStatusBadge(acousticOutput?.status).color}">
-    {#if acousticOutput?.status === "completed"}
+    {#if acousticOutput?.status === "completed" || acousticOutput?.status === "success"}
       <CheckCircle2 class="h-3.5 w-3.5" />
     {:else if acousticOutput?.status === "processing"}
       <Loader2 class="h-3.5 w-3.5 animate-spin" />
@@ -61,7 +62,7 @@
 
   <!-- 解说版状态 -->
   <div class="flex items-center gap-1.5 rounded border px-2 py-1 {getStatusBadge(commentaryOutput?.status).color}">
-    {#if commentaryOutput?.status === "completed"}
+    {#if commentaryOutput?.status === "completed" || commentaryOutput?.status === "success"}
       <CheckCircle2 class="h-3.5 w-3.5" />
     {:else if commentaryOutput?.status === "processing" || commentaryOutput?.status === "synthesizing" || commentaryOutput?.status === "rendering"}
       <Loader2 class="h-3.5 w-3.5 animate-spin" />

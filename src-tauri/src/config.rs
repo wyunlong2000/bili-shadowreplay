@@ -130,7 +130,7 @@ impl Default for AutoClippingConfig {
             window_seconds: 300,
             overlap_seconds: 30,
             max_candidates: 5,
-            min_score: 6.0,
+            min_score: 60.0,
         }
     }
 }

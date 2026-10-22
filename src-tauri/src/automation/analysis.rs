@@ -266,12 +266,13 @@ pub async fn run_analysis_pipeline(
             analyze_window(win, &cues, policy, &evidence_index, config).await;
 
         let checkpoints_json = serde_json::to_string(&win_candidates).unwrap_or_default();
+        let win_live_id = format!("{}_{}", live_id, win.index);
         let analysis_row = AutomationAnalysisRow {
             id: format!("ana_{}_{}", run_id, win.index),
             run_id: run_id.to_string(),
             platform: platform.to_string(),
             room_id: room_id.to_string(),
-            live_id: live_id.to_string(),
+            live_id: win_live_id,
             parent_id: parent_id.to_string(),
             status: "completed".to_string(),
             stage: "analyzed".to_string(),
@@ -307,6 +308,7 @@ pub async fn run_analysis_pipeline(
         room_id,
         parent_id,
         live_id,
+        manifest_items,
     );
 
     log::info!(
@@ -321,7 +323,7 @@ pub async fn run_analysis_pipeline(
     }
 
     let _ = db
-        .update_automation_run_status(run_id, "pending", "candidate_review", None, None)
+        .update_automation_run_status(run_id, "success", "completed", None, None)
         .await;
 
     db.notify_change(DataChange::Automation);

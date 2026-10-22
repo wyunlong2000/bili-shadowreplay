@@ -669,7 +669,7 @@ export interface AutomationCandidateItem {
   status: string;
   content_type: LiveContentType;
   confidence: number;
-  manual_modified: boolean;
+  manual_modified: number | boolean;
   revision: number;
   clip_task_id?: string | null;
   video_id?: number | null;
