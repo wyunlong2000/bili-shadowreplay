@@ -1,6 +1,6 @@
 # Docker 构建与部署命令
 
-本文汇总从源码构建镜像、部署与更新容器的命令。官方镜像的拉取与使用见 [Docker 部署](../../getting-started/installation/docker)。
+本文汇总从源码构建镜像、部署与更新容器的命令。官方镜像的拉取与使用见 [Docker 部署](../getting-started/installation/docker)。
 
 ## 前置条件
 
