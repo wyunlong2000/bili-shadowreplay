@@ -10,6 +10,7 @@ use super::types::{AutomationCandidateRow, AutomationOutputRow, EditPlan, EditPl
 use crate::database::project::ProjectRow;
 use crate::database::video::{MaterialSource, VideoRow};
 use crate::events::DataChange;
+use crate::progress::progress_reporter::ProgressReporterTrait;
 use crate::project::{AudioItem, AudioSource, AudioTrack, Overlay, OverlayContent, OverlayTrack, Timeline, TimelineClip, TimelineSubtitle, TrackKind};
 
 /// 自动化工程与时间轴编译器。
@@ -44,15 +45,12 @@ impl TimelineCompiler {
         let clip_out_sec = clip_in_sec + req_duration_sec;
         let clip_id = format!("clip_{}", Uuid::new_v4().simple());
 
-        let has_narrations = !synthesized_narrations.is_empty();
-        let clip_volume = if has_narrations { 0.25 } else { 1.0 };
-
         let clip = TimelineClip {
             id: clip_id.clone(),
             material_id: material.id,
             start: clip_in_sec,
             end: clip_out_sec,
-            volume: clip_volume,
+            volume: 1.0,
         };
 
         // 依据字幕时间校准：material_time = source_time - actual_start
@@ -469,12 +467,15 @@ impl TimelineCompiler {
         let clip_out_sec = clip_in_sec + req_duration_sec;
         let clip_id = format!("clip_{}", Uuid::new_v4().simple());
 
+        let has_narrations = !synthesized_narrations.is_empty();
+        let clip_volume = if has_narrations { 0.25 } else { 1.0 };
+
         let clip = TimelineClip {
             id: clip_id.clone(),
             material_id: material.id,
             start: clip_in_sec,
             end: clip_out_sec,
-            volume: 1.0,
+            volume: clip_volume,
         };
 
         // 证据字幕
