@@ -28,6 +28,7 @@
   import PowerLiveHotwords from "../lib/components/PowerLiveHotwords.svelte";
   import PowerLiveSentenceLength from "../lib/components/PowerLiveSentenceLength.svelte";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
+  import AutomationSettings from "../lib/components/automation/AutomationSettings.svelte";
   import { registerCommands } from "../lib/stores/commands";
   import {
     themePreference,
@@ -138,6 +139,7 @@
       options: [
         { id: "auto-generate", title: "整场录播生成", keywords: ["auto", "clip", "whole"] },
         { id: "auto-generate-danmu", title: "自动切片压制弹幕", keywords: ["auto", "clip", "danmaku"] },
+        { id: "auto-clip-highlight", title: "智能高光切片", keywords: ["auto", "clip", "highlight", "ai", "高光"] },
       ],
     },
   ];
@@ -1661,6 +1663,10 @@
                     <span></span>
                   </label>
                 </div>
+              </div>
+              <!-- 智能高光生成 (自动化) -->
+              <div class="px-4 py-3" data-setting="auto-clip-highlight">
+                <AutomationSettings />
               </div>
             </div>
           </div>

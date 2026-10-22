@@ -31,6 +31,7 @@
   import PlatformIconTabs from "../lib/components/PlatformIconTabs.svelte";
   import AutoRecordIcon from "../lib/components/AutoRecordIcon.svelte";
   import GenerateWholeClipModal from "../lib/components/GenerateWholeClipModal.svelte";
+  import RoomAutomationDialog from "../lib/components/automation/RoomAutomationDialog.svelte";
   import { onMount } from "svelte";
   import { registerCommands } from "../lib/stores/commands";
 
@@ -45,6 +46,9 @@
   let room_unconfirmed = $state(0);
 
   type DetectionStatus = "live" | "offline" | "unknown" | "unconfirmed";
+
+  let selectedAutomationRoom: RecorderInfo | null = $state(null);
+  let showAutomationDialog = $state(false);
 
   let summary: RecorderList = $state({
     count: 0,
@@ -784,6 +788,12 @@
                 }}>打开网页直播间</DropdownItem
               >
               <DropdownItem
+                onclick={() => {
+                  selectedAutomationRoom = room;
+                  showAutomationDialog = true;
+                }}>自动切片设置</DropdownItem
+              >
+              <DropdownItem
                 class="text-red-500"
                 onclick={() => {
                   deleteRoom = room;
@@ -1244,6 +1254,19 @@
   roomId={generateWholeClipArchive?.room_id || ""}
   onGenerated={handleWholeClipGenerated}
 />
+
+<!-- 房间自动切片策略弹窗 -->
+{#if selectedAutomationRoom}
+  <RoomAutomationDialog
+    platform={selectedAutomationRoom.room_info.platform}
+    roomId={selectedAutomationRoom.room_info.room_id}
+    roomTitle={selectedAutomationRoom.room_info.room_title}
+    open={showAutomationDialog}
+    onClose={() => {
+      showAutomationDialog = false;
+    }}
+  />
+{/if}
 
 <svelte:window onmousedown={handleModalClickOutside} />
 

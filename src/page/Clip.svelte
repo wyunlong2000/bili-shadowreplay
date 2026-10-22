@@ -4,6 +4,7 @@
   import { invoke, get_static_url } from "../lib/invoker";
   import type { ProjectItem } from "../lib/interface";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
+  import AutomationWorkspace from "../lib/components/automation/AutomationWorkspace.svelte";
   import { onMount } from "svelte";
   import {
     Calendar,
@@ -33,6 +34,7 @@
   let projectToNote: ProjectRow | null = $state(null);
   let editingNote = $state("");
   let creating = $state(false);
+  let activeTab: "projects" | "automation" = $state("projects");
 
   let roomIds = $derived([...new Set(projects.map((project) => project.room_id))].filter(Boolean).sort());
   let filtered = $derived.by(() => {
@@ -158,25 +160,44 @@
       切片是由一个或多个素材组成的剪辑工程，可裁剪、分割、添加字幕和压制弹幕，完成后导出到文件或在投稿页投稿。
     </span>
   {/snippet}
-  <button
-    class="titlebar-icon-button"
-    title="刷新"
-    aria-label="刷新"
-    onclick={() => stateRefresh.run()}
-  >
-    <RefreshCw class="h-4 w-4" />
-  </button>
-  <button
-    class="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[7px] bg-accent px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-60"
-    disabled={creating}
-    onclick={createProject}
-  >
-    <Plus class="h-3.5 w-3.5" />
-    新建切片
-  </button>
+  <div class="mr-2 flex items-center rounded-lg bg-control p-0.5 text-xs">
+    <button
+      type="button"
+      class="rounded-md px-2.5 py-1 transition-colors {activeTab === 'projects' ? 'bg-surface text-fg font-medium shadow-sm' : 'text-fg-muted hover:text-fg'}"
+      onclick={() => (activeTab = 'projects')}
+    >
+      切片工程
+    </button>
+    <button
+      type="button"
+      class="rounded-md px-2.5 py-1 transition-colors {activeTab === 'automation' ? 'bg-surface text-fg font-medium shadow-sm' : 'text-fg-muted hover:text-fg'}"
+      onclick={() => (activeTab = 'automation')}
+    >
+      自动化候选
+    </button>
+  </div>
+  {#if activeTab === 'projects'}
+    <button
+      class="titlebar-icon-button"
+      title="刷新"
+      aria-label="刷新"
+      onclick={() => stateRefresh.run()}
+    >
+      <RefreshCw class="h-4 w-4" />
+    </button>
+    <button
+      class="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[7px] bg-accent px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-60"
+      disabled={creating}
+      onclick={createProject}
+    >
+      <Plus class="h-3.5 w-3.5" />
+      新建切片
+    </button>
+  {/if}
 </PageTitlebar>
 
 <div class="flex-1 overflow-auto bg-canvas p-5 custom-scrollbar-light">
+  {#if activeTab === "projects"}
   <div class="space-y-4">
     <div class="ui-card px-3 py-2.5">
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -336,6 +357,9 @@
       {/if}
     </div>
   </div>
+  {:else}
+    <AutomationWorkspace onOpenProject={openProject} />
+  {/if}
 </div>
 
 {#if projectToDelete}
