@@ -422,6 +422,7 @@ export interface Config {
   openai_api_key: string;
   clip_name_format: string;
   auto_generate: AutoGenerateConfig;
+  auto_clipping?: AutoClippingConfig;
   status_check_interval: number;
   whisper_language: string;
   webhook_url: string;
@@ -596,4 +597,114 @@ export interface DanmuEntry {
 export interface RecorderList {
   count: number;
   recorders: RecorderInfo[];
+}
+
+export type LiveContentType =
+  | "chat"
+  | "knowledge"
+  | "gaming"
+  | "sports"
+  | "commerce"
+  | "mixed"
+  | "other";
+
+export type ClipOutputMode = "original" | "commentary" | "both";
+
+export type AutomationRunStatus =
+  | "pending"
+  | "processing"
+  | "waiting"
+  | "success"
+  | "partial_success"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+
+export type AutomationStage =
+  | "idle"
+  | "indexing"
+  | "transcribing"
+  | "analyzing"
+  | "reviewing"
+  | "arranging"
+  | "synthesizing"
+  | "rendering"
+  | "verifying"
+  | "completed"
+  | "failed";
+
+export interface AutoClippingConfig {
+  enabled: boolean;
+  content_type: LiveContentType;
+  auto_classify: boolean;
+  output_mode: ClipOutputMode;
+  window_seconds: number;
+  overlap_seconds: number;
+  max_candidates: number;
+  min_score: number;
+}
+
+export interface AutomationRoomPolicy {
+  platform: string;
+  room_id: string;
+  enabled?: boolean | null;
+  content_type?: LiveContentType | null;
+  auto_classify?: boolean | null;
+  output_mode?: ClipOutputMode | null;
+  max_candidates?: number | null;
+  revision: number;
+}
+
+export interface AutomationCandidateItem {
+  id: string;
+  run_id: string;
+  platform: string;
+  room_id: string;
+  parent_id: string;
+  live_id: string;
+  start_ms: number;
+  end_ms: number;
+  score: number;
+  reason: string;
+  status: string;
+  content_type: LiveContentType;
+  confidence: number;
+  manual_modified: boolean;
+  revision: number;
+  clip_task_id?: string | null;
+  video_id?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationRunItem {
+  id: string;
+  platform: string;
+  room_id: string;
+  parent_id: string;
+  live_id: string;
+  range_start_ms: number;
+  range_end_ms: number;
+  status: AutomationRunStatus;
+  stage: AutomationStage;
+  completed_windows: number;
+  total_windows: number;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationOutputItem {
+  id: string;
+  candidate_id: string;
+  output_mode: "original" | "commentary";
+  plan_version: number;
+  project_id?: number | null;
+  material_id?: number | null;
+  status: string;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
 }

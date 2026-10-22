@@ -37,6 +37,8 @@ pub struct Config {
     pub clip_name_format: String,
     #[serde(default = "default_auto_generate_config")]
     pub auto_generate: AutoGenerateConfig,
+    #[serde(default = "default_auto_clipping_config")]
+    pub auto_clipping: AutoClippingConfig,
     #[serde(default = "default_status_check_interval")]
     pub status_check_interval: u64,
     #[serde(skip)]
@@ -104,6 +106,37 @@ pub struct LlmConfig {
 pub struct AutoGenerateConfig {
     pub enabled: bool,
     pub encode_danmu: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct AutoClippingConfig {
+    pub enabled: bool,
+    pub content_type: crate::automation::types::LiveContentType,
+    pub auto_classify: bool,
+    pub output_mode: crate::automation::types::ClipOutputMode,
+    pub window_seconds: u64,
+    pub overlap_seconds: u64,
+    pub max_candidates: usize,
+    pub min_score: f64,
+}
+
+impl Default for AutoClippingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            content_type: crate::automation::types::LiveContentType::Mixed,
+            auto_classify: true,
+            output_mode: crate::automation::types::ClipOutputMode::Both,
+            window_seconds: 300,
+            overlap_seconds: 30,
+            max_candidates: 5,
+            min_score: 6.0,
+        }
+    }
+}
+
+fn default_auto_clipping_config() -> AutoClippingConfig {
+    AutoClippingConfig::default()
 }
 
 fn default_danmu_ass_options() -> Danmu2AssOptions {

@@ -3,6 +3,7 @@
 
 mod agent;
 mod audio_utils;
+mod automation;
 mod config;
 mod constants;
 mod danmu2ass;
@@ -692,6 +693,130 @@ fn get_migrations() -> Vec<Migration> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_automation_notifications_retry
                     ON automation_notifications (status, next_retry_at);
+            "#,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 25,
+            description: "add_automation_v2_schema",
+            sql: r#"
+                CREATE TABLE IF NOT EXISTS automation_room_policies (
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    policy_json TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, room_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS automation_runs (
+                    id TEXT PRIMARY KEY,
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    range_start_ms INTEGER NOT NULL,
+                    range_end_ms INTEGER NOT NULL,
+                    request_key TEXT NOT NULL UNIQUE,
+                    input_hash TEXT NOT NULL,
+                    config_snapshot_json TEXT NOT NULL,
+                    policy_fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    task_id TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    source_manifest_json TEXT NOT NULL,
+                    completed_windows INTEGER NOT NULL DEFAULT 0,
+                    total_windows INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_automation_runs_lookup
+                    ON automation_runs (platform, room_id, parent_id, status);
+
+                CREATE TABLE IF NOT EXISTS automation_outputs (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL,
+                    output_mode TEXT NOT NULL,
+                    plan_version INTEGER NOT NULL DEFAULT 1,
+                    plan_json TEXT NOT NULL,
+                    plan_hash TEXT NOT NULL,
+                    project_id INTEGER,
+                    material_id INTEGER,
+                    assets_json TEXT NOT NULL,
+                    render_task_id TEXT,
+                    status TEXT NOT NULL,
+                    error_code TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (candidate_id, output_mode, plan_version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_automation_outputs_candidate
+                    ON automation_outputs (candidate_id, output_mode);
+
+                CREATE TABLE IF NOT EXISTS automation_analysis_v2 (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    processed_until_ms INTEGER NOT NULL DEFAULT 0,
+                    window_seconds INTEGER NOT NULL,
+                    subtitle_json TEXT,
+                    checkpoints_json TEXT,
+                    input_hash TEXT NOT NULL DEFAULT '',
+                    task_id TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (run_id, live_id)
+                );
+                INSERT INTO automation_analysis_v2 (id, platform, room_id, live_id, parent_id, status, stage, processed_until_ms, window_seconds, subtitle_json, task_id, error_message, created_at, updated_at)
+                    SELECT (platform || '_' || room_id || '_' || live_id), platform, room_id, live_id, parent_id, status, stage, processed_until_ms, window_seconds, subtitle_json, task_id, error_message, created_at, updated_at FROM automation_analysis;
+                DROP TABLE automation_analysis;
+                ALTER TABLE automation_analysis_v2 RENAME TO automation_analysis;
+                CREATE INDEX IF NOT EXISTS idx_automation_analysis_run ON automation_analysis (run_id);
+
+                CREATE TABLE IF NOT EXISTS automation_candidates_v2 (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    live_id TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'other',
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    manual_modified INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    clip_task_id TEXT,
+                    video_id INTEGER,
+                    notify_status TEXT NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (run_id, live_id, start_ms, end_ms)
+                );
+                INSERT INTO automation_candidates_v2 (id, platform, room_id, parent_id, live_id, start_ms, end_ms, score, signals_json, reason, status, clip_task_id, video_id, notify_status, error_message, created_at, updated_at)
+                    SELECT id, platform, room_id, parent_id, live_id, start_ms, end_ms, score, signals_json, reason, status, clip_task_id, video_id, notify_status, error_message, created_at, updated_at FROM automation_candidates;
+                DROP TABLE automation_candidates;
+                ALTER TABLE automation_candidates_v2 RENAME TO automation_candidates;
+                CREATE INDEX IF NOT EXISTS idx_candidates_run ON automation_candidates (run_id);
+                CREATE INDEX IF NOT EXISTS idx_candidates_parent ON automation_candidates (room_id, parent_id);
             "#,
             kind: MigrationKind::Up,
         },

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 pub mod account;
 pub mod audio;
+pub mod automation;
 pub mod bilibili_user;
 #[cfg_attr(
     not(feature = "credential-encryption"),
