@@ -58,6 +58,7 @@ clap = { version = "4.5.37", features = ["derive"] }
 url = "2.5.4"
 srtparse = "0.2.0"
 thiserror = "2"
+regex = "1.13"
 sanitize-filename = "0.6.0"
 tempfile = "3.20.0"
 fontdb = { version = "0.23", default-features = false, features = ["fs", "fontconfig"] }
@@ -74,6 +75,9 @@ sherpa-onnx = { version = "1.13.4", default-features = false, features = ["share
 
 [target.'cfg(not(windows))'.dependencies]
 sherpa-onnx = "1.13.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [features]
 # this feature is used for production builds or when `devPath` points to the filesystem

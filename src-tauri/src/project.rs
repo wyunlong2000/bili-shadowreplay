@@ -4,6 +4,19 @@
 //! `start..end` of a material. Subtitles are anchored to a clip in material
 //! time, so they follow the picture when clips are moved or trimmed; the part
 //! outside the clip's visible window is hidden rather than lost.
+//!
+//! Overlays sit on tracks above the main one, a higher track covering lower
+//! ones: video tracks show other materials, sticker tracks texts and
+//! stickers, in any order between the main track and the subtitles. Each is
+//! anchored by where it starts, like a subtitle, and runs for its own length,
+//! also over later clips.
+//!
+//! Audio items (music, voiceover, the sound of another material) sit on audio
+//! tracks below the main one and are anchored the same way; all of them are
+//! heard together with the clips' own sound.
+//!
+//! Overlays and audio items start over the main track but may run on past its
+//! end: the project then lasts until the last of them ends, over black.
 
 use recorder::danmu::DanmuEntry;
 use serde::{Deserialize, Serialize};
@@ -12,6 +25,8 @@ use sha2::{Digest, Sha256};
 pub const TIMELINE_VERSION: u32 = 1;
 /// Durations closer than this are treated as the whole material.
 const FULL_MATERIAL_TOLERANCE: f64 = 0.05;
+/// Overlay spans this short, from rounding, are empty.
+const EPSILON: f64 = 1e-6;
 
 fn timeline_version() -> u32 {
     TIMELINE_VERSION
@@ -25,6 +40,9 @@ pub struct Timeline {
     pub clips: Vec<TimelineClip>,
     #[serde(default)]
     pub subtitles: Vec<TimelineSubtitle>,
+    /// Tracks drawn over the main track, the bottom one first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<OverlayTrack>,
     /// The editor's `SubtitleStyle`, opaque to the backend: subtitles are burned
     /// from the ASS document the editor previews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +50,9 @@ pub struct Timeline {
     /// Burn the materials' danmaku when exporting.
     #[serde(default)]
     pub danmu: bool,
+    /// Tracks of sound below the main track, the top one first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 impl Default for Timeline {
@@ -40,8 +61,10 @@ impl Default for Timeline {
             version: TIMELINE_VERSION,
             clips: Vec::new(),
             subtitles: Vec::new(),
+            tracks: Vec::new(),
             subtitle_style: None,
             danmu: false,
+            audio_tracks: Vec::new(),
         }
     }
 }
@@ -54,6 +77,9 @@ pub struct TimelineClip {
     pub start: f64,
     /// Out point within the material, in seconds.
     pub end: f64,
+    /// Of the material's own sound, 0 to 1.
+    #[serde(default = "full_volume", skip_serializing_if = "is_full_volume")]
+    pub volume: f64,
 }
 
 impl TimelineClip {
@@ -72,10 +98,212 @@ pub struct TimelineSubtitle {
     pub text: String,
 }
 
+/// A track above the main one; its items do not overlap in time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayTrack {
+    pub id: String,
+    /// What the track holds; absent on tracks from before tracks had kinds,
+    /// which may hold both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TrackKind>,
+    #[serde(default)]
+    pub items: Vec<Overlay>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackKind {
+    /// Video overlays.
+    Video,
+    /// Texts and stickers.
+    Sticker,
+}
+
+/// Something drawn over the main track, anchored to the clip it starts over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Overlay {
+    pub id: String,
+    pub clip_id: String,
+    /// Where it starts, in the anchor clip's material time.
+    pub start: f64,
+    /// Length in project time.
+    pub duration: f64,
+    #[serde(flatten)]
+    pub content: OverlayContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum OverlayContent {
+    /// Drawn by the editor, which sends the picture to burn with an export.
+    Text {
+        element: serde_json::Value,
+    },
+    /// Drawn by the editor, like a text.
+    Sticker {
+        element: serde_json::Value,
+    },
+    Video(VideoOverlay),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoOverlay {
+    pub material_id: i64,
+    /// Material time shown at the overlay's start.
+    pub source_start: f64,
+    /// 0 to 1.
+    #[serde(default = "full_volume")]
+    pub volume: f64,
+    /// 0 to 1; opaque when absent.
+    #[serde(default = "full_volume", skip_serializing_if = "is_full_volume")]
+    pub opacity: f64,
+    pub element: VideoPlacement,
+}
+
+fn full_volume() -> f64 {
+    1.0
+}
+
+fn is_full_volume(volume: &f64) -> bool {
+    *volume == 1.0
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+/// Where a video overlay sits on the 1920×1080 picture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlacement {
+    /// Center.
+    pub x: f64,
+    pub y: f64,
+    /// The height follows the material's aspect ratio.
+    pub width: f64,
+    /// Degrees, clockwise.
+    #[serde(default)]
+    pub rotation: f64,
+}
+
+impl Overlay {
+    pub fn video(&self) -> Option<&VideoOverlay> {
+        match &self.content {
+            OverlayContent::Video(video) => Some(video),
+            _ => None,
+        }
+    }
+
+    /// The kind of track it goes on.
+    pub fn track_kind(&self) -> TrackKind {
+        match self.content {
+            OverlayContent::Video(_) => TrackKind::Video,
+            OverlayContent::Text { .. } | OverlayContent::Sticker { .. } => TrackKind::Sticker,
+        }
+    }
+}
+
+/// A track below the main one; its items do not overlap in time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioTrack {
+    pub id: String,
+    #[serde(default)]
+    pub items: Vec<AudioItem>,
+}
+
+/// Sound heard with the main track, anchored to the clip it starts over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioItem {
+    pub id: String,
+    pub clip_id: String,
+    /// Where it starts, in the anchor clip's material time.
+    pub start: f64,
+    /// Length in project time.
+    pub duration: f64,
+    #[serde(flatten)]
+    pub source: AudioSource,
+    /// Time in the source heard at the item's start.
+    #[serde(default)]
+    pub source_start: f64,
+    /// 0 to 1.
+    #[serde(default = "full_volume")]
+    pub volume: f64,
+    /// Seconds the sound fades in over from where it is first heard, and out
+    /// over until where it is last heard.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fade_in: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fade_out: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum AudioSource {
+    /// A file of the audio library.
+    File { audio_id: i64 },
+    /// The sound of a material, without its picture.
+    Material { material_id: i64 },
+}
+
+impl AudioItem {
+    pub fn material_id(&self) -> Option<i64> {
+        match self.source {
+            AudioSource::Material { material_id } => Some(material_id),
+            AudioSource::File { .. } => None,
+        }
+    }
+
+    pub fn audio_id(&self) -> Option<i64> {
+        match self.source {
+            AudioSource::File { audio_id } => Some(audio_id),
+            AudioSource::Material { .. } => None,
+        }
+    }
+}
+
 /// A clip together with where it starts on the project timeline.
 pub struct PlacedClip<'a> {
     pub clip: &'a TimelineClip,
     pub offset: f64,
+}
+
+/// The visible part of an overlay, in project time.
+pub struct PlacedOverlay<'a> {
+    pub overlay: &'a Overlay,
+    pub start: f64,
+    pub end: f64,
+    /// How much is hidden before `start`, cut off with the head of its clip; a
+    /// video overlay skips as much of its material.
+    pub skip: f64,
+}
+
+/// The part of an audio item that is heard, in project time.
+pub struct PlacedAudio<'a> {
+    pub item: &'a AudioItem,
+    pub start: f64,
+    pub end: f64,
+    /// How much is cut off before `start` with the head of its clip, which
+    /// its source skips.
+    pub skip: f64,
+}
+
+/// The visible part of something anchored at `start` of clip `clip_id` and
+/// running `duration` on, maybe past the main track, as `(start, end, skip)`
+/// in project time like a [`PlacedOverlay`]; `None` when none of it is.
+fn anchored_span(
+    placed: &[PlacedClip],
+    clip_id: &str,
+    start: f64,
+    duration: f64,
+) -> Option<(f64, f64, f64)> {
+    let clip = placed.iter().find(|p| p.clip.id == clip_id)?;
+    // Anchored past the out point, it was trimmed away with its clip.
+    if start >= clip.clip.end {
+        return None;
+    }
+    let from = clip.offset + start - clip.clip.start;
+    let shown = from.max(clip.offset);
+    let end = from + duration;
+    (end - shown > EPSILON).then_some((shown, end, shown - from))
 }
 
 pub fn new_id() -> String {
@@ -105,6 +333,7 @@ impl Timeline {
                     material_id,
                     start: 0.0,
                     end: duration,
+                    volume: 1.0,
                 })
                 .collect(),
             ..Self::default()
@@ -123,8 +352,17 @@ impl Timeline {
             .collect()
     }
 
-    pub fn duration(&self) -> f64 {
+    /// How long the clips of the main track last together.
+    pub fn main_duration(&self) -> f64 {
         self.clips.iter().map(TimelineClip::duration).sum()
+    }
+
+    /// How long the project lasts: until the end of the main track, or of
+    /// the overlays and audio items running on past it.
+    pub fn duration(&self) -> f64 {
+        let overlays = self.placed_overlays().into_iter().map(|placed| placed.end);
+        let audio = self.placed_audio().into_iter().map(|placed| placed.end);
+        overlays.chain(audio).fold(self.main_duration(), f64::max)
     }
 
     /// Project-time span of a subtitle, or `None` when it is hidden.
@@ -145,6 +383,55 @@ impl Timeline {
         })
     }
 
+    /// Visible overlays, the bottom track first and each track's items in
+    /// order, which is the order they are drawn in.
+    pub fn placed_overlays(&self) -> Vec<PlacedOverlay<'_>> {
+        let placed = self.placed();
+        self.tracks
+            .iter()
+            .flat_map(|track| &track.items)
+            .filter_map(|overlay| {
+                let (start, end, skip) =
+                    anchored_span(&placed, &overlay.clip_id, overlay.start, overlay.duration)?;
+                Some(PlacedOverlay {
+                    overlay,
+                    start,
+                    end,
+                    skip,
+                })
+            })
+            .collect()
+    }
+
+    /// The audio items heard, the top track first and each track's items in
+    /// order.
+    pub fn placed_audio(&self) -> Vec<PlacedAudio<'_>> {
+        let placed = self.placed();
+        self.audio_tracks
+            .iter()
+            .flat_map(|track| &track.items)
+            .filter_map(|item| {
+                let (start, end, skip) =
+                    anchored_span(&placed, &item.clip_id, item.start, item.duration)?;
+                Some(PlacedAudio {
+                    item,
+                    start,
+                    end,
+                    skip,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether the sound is the clips' own, as it is in their materials.
+    fn has_plain_sound(&self) -> bool {
+        self.clips.iter().all(|clip| clip.volume == 1.0) && self.placed_audio().is_empty()
+    }
+
+    pub fn has_visible_overlays(&self) -> bool {
+        !self.placed_overlays().is_empty()
+    }
+
     /// Bring the backend's own edits of a saved timeline into this one, which
     /// is being edited. Between `base`, the saved timeline the editor last
     /// knew, and `saved`, the saved one now, the backend may switch danmaku,
@@ -157,6 +444,12 @@ impl Timeline {
         for material_id in base.material_ids() {
             if !remaining.contains(&material_id) {
                 self.remove_material(material_id);
+            }
+        }
+        let remaining = saved.audio_ids();
+        for audio_id in base.audio_ids() {
+            if !remaining.contains(&audio_id) {
+                self.remove_audio(audio_id);
             }
         }
         let filled: Vec<TimelineSubtitle> = saved
@@ -172,24 +465,46 @@ impl Timeline {
         self.subtitles.extend(filled);
     }
 
-    /// Distinct materials in timeline order.
+    /// Distinct materials in timeline order: the main track's, then those of
+    /// video overlays, then those heard on audio tracks.
     pub fn material_ids(&self) -> Vec<i64> {
-        let mut ids = Vec::new();
-        for clip in &self.clips {
-            if !ids.contains(&clip.material_id) {
-                ids.push(clip.material_id);
-            }
-        }
-        ids
+        let overlays = self
+            .tracks
+            .iter()
+            .flat_map(|track| &track.items)
+            .filter_map(Overlay::video)
+            .map(|video| video.material_id);
+        let sounds = self.audio_items().filter_map(AudioItem::material_id);
+        distinct(
+            self.clips
+                .iter()
+                .map(|clip| clip.material_id)
+                .chain(overlays)
+                .chain(sounds),
+        )
+    }
+
+    /// Distinct files of the audio library heard, in timeline order.
+    pub fn audio_ids(&self) -> Vec<i64> {
+        distinct(self.audio_items().filter_map(AudioItem::audio_id))
+    }
+
+    pub fn uses_audio(&self, audio_id: i64) -> bool {
+        self.audio_ids().contains(&audio_id)
+    }
+
+    fn audio_items(&self) -> impl Iterator<Item = &AudioItem> {
+        self.audio_tracks.iter().flat_map(|track| &track.items)
     }
 
     pub fn uses_material(&self, material_id: i64) -> bool {
-        self.clips
-            .iter()
-            .any(|clip| clip.material_id == material_id)
+        self.material_ids().contains(&material_id)
     }
 
-    /// Drop the material's clips and the subtitles anchored to them.
+    /// Drop the material's clips with the subtitles and overlays anchored to
+    /// them, the video overlays showing it and the audio items playing its
+    /// sound. Other audio items anchored to its clips move on to the clips
+    /// that take their place.
     pub fn remove_material(&mut self, material_id: i64) -> bool {
         let removed: Vec<String> = self
             .clips
@@ -197,13 +512,84 @@ impl Timeline {
             .filter(|clip| clip.material_id == material_id)
             .map(|clip| clip.id.clone())
             .collect();
-        if removed.is_empty() {
-            return false;
-        }
+        let items = self.item_count();
+        self.retain_audio(|item| item.material_id() != Some(material_id));
+        self.reanchor_audio(&removed);
         self.clips.retain(|clip| clip.material_id != material_id);
         self.subtitles
             .retain(|subtitle| !removed.contains(&subtitle.clip_id));
-        true
+        for track in &mut self.tracks {
+            track.items.retain(|overlay| {
+                !removed.contains(&overlay.clip_id)
+                    && overlay
+                        .video()
+                        .is_none_or(|video| video.material_id != material_id)
+            });
+        }
+        self.tracks.retain(|track| !track.items.is_empty());
+        !removed.is_empty() || self.item_count() != items
+    }
+
+    /// Drop the audio items playing a file of the audio library.
+    pub fn remove_audio(&mut self, audio_id: i64) -> bool {
+        let items = self.item_count();
+        self.retain_audio(|item| item.audio_id() != Some(audio_id));
+        self.item_count() != items
+    }
+
+    fn retain_audio(&mut self, mut keep: impl FnMut(&AudioItem) -> bool) {
+        for track in &mut self.audio_tracks {
+            track.items.retain(&mut keep);
+        }
+        self.audio_tracks.retain(|track| !track.items.is_empty());
+    }
+
+    /// Move the audio items anchored to the clips of `removed`, which are
+    /// about to go, onto the first clip after them that stays: where those
+    /// clips were, playing on from where each was first heard. Those with no
+    /// clip after them, or not heard at all, go.
+    fn reanchor_audio(&mut self, removed: &[String]) {
+        let placed = self.placed();
+        let mut moves = Vec::new();
+        for (track, items) in self.audio_tracks.iter().enumerate() {
+            for (index, item) in items.items.iter().enumerate() {
+                let Some(at) = placed.iter().position(|p| p.clip.id == item.clip_id) else {
+                    continue;
+                };
+                if !removed.contains(&item.clip_id) {
+                    continue;
+                }
+                let clip = &placed[at];
+                let from = clip.offset + item.start - clip.clip.start;
+                let skip = (clip.offset - from).max(0.0);
+                let heard = item.start < clip.clip.end && item.duration - skip > EPSILON;
+                let next = placed[at + 1..]
+                    .iter()
+                    .find(|p| !removed.contains(&p.clip.id))
+                    .filter(|_| heard)
+                    .map(|p| (p.clip.id.clone(), p.clip.start));
+                moves.push((track, index, next, skip));
+            }
+        }
+        let mut gone = Vec::new();
+        for (track, index, next, skip) in moves {
+            let item = &mut self.audio_tracks[track].items[index];
+            match next {
+                Some((clip_id, start)) => {
+                    item.clip_id = clip_id;
+                    item.start = start;
+                    item.source_start += skip;
+                    item.duration -= skip;
+                }
+                None => gone.push(item.id.clone()),
+            }
+        }
+        self.retain_audio(|item| !gone.contains(&item.id));
+    }
+
+    fn item_count(&self) -> usize {
+        let overlays: usize = self.tracks.iter().map(|track| track.items.len()).sum();
+        overlays + self.audio_items().count()
     }
 
     /// Anchor material-time cues to `clip_id`, replacing its existing subtitles.
@@ -220,8 +606,14 @@ impl Timeline {
             }));
     }
 
-    /// Check clip ranges against the materials' lengths.
-    pub fn validate(&self, material_duration: impl Fn(i64) -> Option<f64>) -> Result<(), String> {
+    /// Check clip ranges against the materials' lengths, and what audio
+    /// items play against those of their sources: materials, or files of the
+    /// audio library.
+    pub fn validate(
+        &self,
+        material_duration: impl Fn(i64) -> Option<f64>,
+        audio_duration: impl Fn(i64) -> Option<f64>,
+    ) -> Result<(), String> {
         if self.clips.is_empty() {
             return Err("时间轴上没有片段".to_string());
         }
@@ -234,9 +626,61 @@ impl Timeline {
                 && clip.start >= 0.0
                 && clip.end > clip.start
                 // Durations of legacy materials are probed lazily and may be 0.
-                && (duration <= 0.0 || clip.end <= duration + 0.5);
+                && (duration <= 0.0 || clip.end <= duration + 0.5)
+                && is_volume(clip.volume);
             if !valid {
                 return Err(format!("第 {} 个片段的范围无效", index + 1));
+            }
+        }
+        for placed in self.placed_audio() {
+            let item = placed.item;
+            let duration = match item.source {
+                AudioSource::File { audio_id } => audio_duration(audio_id),
+                AudioSource::Material { material_id } => material_duration(material_id),
+            };
+            let Some(duration) = duration else {
+                return Err("音频轨上的声音文件不存在".to_string());
+            };
+            let start = item.source_start + placed.skip;
+            let valid = start.is_finite()
+                && start >= 0.0
+                && (duration <= 0.0 || start + placed.end - placed.start <= duration + 0.5)
+                && is_volume(item.volume)
+                && [item.fade_in, item.fade_out]
+                    .iter()
+                    .all(|fade| fade.is_finite() && *fade >= 0.0);
+            if !valid {
+                return Err("音频轨上的声音范围无效".to_string());
+            }
+        }
+        let misplaced = self.tracks.iter().any(|track| {
+            track
+                .kind
+                .is_some_and(|kind| track.items.iter().any(|item| item.track_kind() != kind))
+        });
+        if misplaced {
+            return Err("轨道上有不属于该轨道类型的内容".to_string());
+        }
+        for placed in self.placed_overlays() {
+            let Some(video) = placed.overlay.video() else {
+                continue;
+            };
+            let Some(duration) = material_duration(video.material_id) else {
+                return Err("画中画的素材不存在".to_string());
+            };
+            let start = video.source_start + placed.skip;
+            let placement = &video.element;
+            let valid = start.is_finite()
+                && start >= 0.0
+                && (duration <= 0.0 || start + placed.end - placed.start <= duration + 0.5)
+                && [placement.x, placement.y, placement.rotation, video.volume]
+                    .iter()
+                    .all(|value| value.is_finite())
+                && placement.width.is_finite()
+                && placement.width >= 1.0
+                && (0.0..=1.0).contains(&video.opacity);
+            if !valid {
+                return Err("画中画的范围无效".to_string());
             }
         }
         Ok(())
@@ -251,7 +695,12 @@ impl Timeline {
         let untouched = clip.start <= FULL_MATERIAL_TOLERANCE
             && material_duration > 0.0
             && clip.end >= material_duration - FULL_MATERIAL_TOLERANCE;
-        (untouched && !self.danmu && !self.has_visible_subtitles()).then_some(clip.material_id)
+        (untouched
+            && !self.danmu
+            && !self.has_visible_subtitles()
+            && !self.has_visible_overlays()
+            && self.has_plain_sound())
+        .then_some(clip.material_id)
     }
 
     /// Identifies an export: a different hash means the output is stale.
@@ -269,9 +718,15 @@ impl Timeline {
     }
 
     /// Map each clip's visible material danmaku (`ts` in ms from the material
-    /// start) onto the project timeline.
+    /// start) onto the project timeline at `fps`.
+    ///
+    /// Each lands in the middle of the frame before the first one showing it,
+    /// counted from its clip's first frame on the project's frame grid. Moved
+    /// by whole frames with its clip, a danmaku then moves by as many frames,
+    /// however its time is rounded on the way to an ASS document.
     pub fn map_danmus<'a>(
         &self,
+        fps: f64,
         material_danmus: impl Fn(i64) -> Option<&'a [DanmuEntry]>,
     ) -> Vec<DanmuEntry> {
         let mut mapped = Vec::new();
@@ -281,20 +736,39 @@ impl Timeline {
             };
             let start = (placed.clip.start * 1000.0).round() as i64;
             let end = (placed.clip.end * 1000.0).round() as i64;
-            let offset = (placed.offset * 1000.0).round() as i64;
+            let first_frame = (placed.offset * fps).round();
             mapped.extend(
                 danmus
                     .iter()
                     .filter(|danmu| danmu.ts >= start && danmu.ts < end)
-                    .map(|danmu| DanmuEntry {
-                        ts: danmu.ts - start + offset,
-                        ..danmu.clone()
+                    .map(|danmu| {
+                        let into = danmu.ts as f64 / 1000.0 - placed.clip.start;
+                        let frame = first_frame + (into * fps - EPSILON).ceil();
+                        DanmuEntry {
+                            ts: ((frame - 0.5) / fps * 1000.0).round().max(0.0) as i64,
+                            ..danmu.clone()
+                        }
                     }),
             );
         }
         mapped.sort_by_key(|danmu| danmu.ts);
         mapped
     }
+}
+
+fn is_volume(volume: f64) -> bool {
+    (0.0..=1.0).contains(&volume)
+}
+
+/// `ids` without repeats, in order.
+fn distinct(ids: impl Iterator<Item = i64>) -> Vec<i64> {
+    let mut result = Vec::new();
+    for id in ids {
+        if !result.contains(&id) {
+            result.push(id);
+        }
+    }
+    result
 }
 
 /// Parse SRT into `(start, end, text)` cues in seconds.
@@ -332,6 +806,7 @@ mod tests {
             material_id,
             start,
             end,
+            volume: 1.0,
         }
     }
 
@@ -397,13 +872,50 @@ mod tests {
         let timeline = timeline();
         let first = [danmu(9_000), danmu(10_000), danmu(19_999), danmu(20_000)];
         let second = [danmu(1_000)];
-        let mapped = timeline.map_danmus(|id| match id {
+        let mapped = timeline.map_danmus(30.0, |id| match id {
             1 => Some(&first[..]),
             2 => Some(&second[..]),
             _ => None,
         });
+        // Each half a frame before the first frame showing it: frames 0,
+        // 300 and 330.
         let times: Vec<i64> = mapped.iter().map(|d| d.ts).collect();
-        assert_eq!(times, vec![0, 9_999, 11_000]);
+        assert_eq!(times, vec![0, 9_983, 10_983]);
+    }
+
+    #[test]
+    fn danmaku_moved_by_whole_frames_move_by_as_many_frames() {
+        let first = [danmu(0)];
+        let second = [danmu(1_234), danmu(2_000)];
+        let frames = |lead: f64| {
+            let timeline = Timeline {
+                clips: vec![clip("a", 1, 0.0, lead), clip("b", 2, 0.0, 5.0)],
+                ..Timeline::default()
+            };
+            let mapped = timeline.map_danmus(60.0, |id| match id {
+                1 => Some(&first[..]),
+                2 => Some(&second[..]),
+                _ => None,
+            });
+            // The frame showing each first, as an ASS document has it, to the
+            // centisecond.
+            mapped[1..]
+                .iter()
+                .map(|danmu| {
+                    let centiseconds = (danmu.ts as f64 / 10.0).round();
+                    (centiseconds / 100.0 * 60.0).ceil() as i64
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = frames(1.0);
+        for moved in 1..=12 {
+            let after = frames(1.0 + f64::from(moved) / 60.0);
+            let shifted: Vec<_> = before
+                .iter()
+                .map(|frame| frame + i64::from(moved))
+                .collect();
+            assert_eq!(after, shifted, "moved by {moved} frames");
+        }
     }
 
     #[test]
@@ -437,10 +949,14 @@ mod tests {
     #[test]
     fn validation_rejects_missing_materials_and_bad_ranges() {
         let timeline = timeline();
-        assert!(timeline.validate(|_| Some(30.0)).is_ok());
-        assert!(timeline.validate(|id| (id == 1).then_some(30.0)).is_err());
-        assert!(timeline.validate(|_| Some(12.0)).is_err());
-        assert!(Timeline::default().validate(|_| Some(1.0)).is_err());
+        assert!(timeline.validate(|_| Some(30.0), |_| None).is_ok());
+        assert!(timeline
+            .validate(|id| (id == 1).then_some(30.0), |_| None)
+            .is_err());
+        assert!(timeline.validate(|_| Some(12.0), |_| None).is_err());
+        assert!(Timeline::default()
+            .validate(|_| Some(1.0), |_| None)
+            .is_err());
     }
 
     #[test]
@@ -451,6 +967,387 @@ mod tests {
         assert_eq!(timeline.render_hash(""), timeline.render_hash(""));
         assert_ne!(timeline.render_hash(""), changed.render_hash(""));
         assert_ne!(timeline.render_hash(""), timeline.render_hash("danmu"));
+    }
+
+    fn text_overlay(id: &str, clip_id: &str, start: f64, duration: f64) -> Overlay {
+        Overlay {
+            id: id.into(),
+            clip_id: clip_id.into(),
+            start,
+            duration,
+            content: OverlayContent::Text {
+                element: serde_json::json!({ "content": id }),
+            },
+        }
+    }
+
+    fn video_overlay(id: &str, clip_id: &str, start: f64, material_id: i64) -> Overlay {
+        Overlay {
+            id: id.into(),
+            clip_id: clip_id.into(),
+            start,
+            duration: 3.0,
+            content: OverlayContent::Video(VideoOverlay {
+                material_id,
+                source_start: 1.0,
+                volume: 1.0,
+                opacity: 1.0,
+                element: VideoPlacement {
+                    x: 1500.0,
+                    y: 800.0,
+                    width: 640.0,
+                    rotation: 0.0,
+                },
+            }),
+        }
+    }
+
+    fn with_tracks(tracks: Vec<Vec<Overlay>>) -> Timeline {
+        Timeline {
+            tracks: tracks
+                .into_iter()
+                .enumerate()
+                .map(|(index, items)| OverlayTrack {
+                    id: format!("t{index}"),
+                    kind: None,
+                    items,
+                })
+                .collect(),
+            ..timeline()
+        }
+    }
+
+    fn spans(timeline: &Timeline) -> Vec<(String, f64, f64, f64)> {
+        timeline
+            .placed_overlays()
+            .iter()
+            .map(|p| (p.overlay.id.clone(), p.start, p.end, p.skip))
+            .collect()
+    }
+
+    #[test]
+    fn overlays_keep_the_fields_only_the_editor_reads() {
+        let json = r##"{"version":1,"clips":[],"subtitles":[],"tracks":[{"id":"t","items":[
+            {"id":"a","clip_id":"c","start":1.5,"duration":2.0,"kind":"text",
+             "element":{"kind":"text","id":0,"x":960,"y":540,"rotation":0,"content":"hi","fill":"#FFF","stroke":null}},
+            {"id":"b","clip_id":"c","start":0.0,"duration":3.0,"kind":"video","material_id":4,
+             "source_start":2.0,"volume":0.5,"element":{"x":10.0,"y":20.0,"width":640.0,"rotation":15.0}}]}],"danmu":false}"##;
+        let timeline = Timeline::parse(json).unwrap();
+        let items = &timeline.tracks[0].items;
+        assert!(
+            matches!(&items[0].content, OverlayContent::Text { element } if element["fill"] == "#FFF")
+        );
+        assert_eq!(
+            items[1].video().map(|v| (v.material_id, v.volume)),
+            Some((4, 0.5))
+        );
+        let reparsed: serde_json::Value = serde_json::from_str(&timeline.to_json()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(reparsed, original);
+        // Timelines without overlays are saved as before.
+        assert!(!Timeline::default().to_json().contains("tracks"));
+    }
+
+    #[test]
+    fn overlays_follow_their_clip_and_run_on_over_later_ones() {
+        // a shows 10-20 at 0-10, b shows 0-5 at 10-15.
+        let timeline = with_tracks(vec![
+            vec![
+                text_overlay("x", "a", 18.0, 4.0),
+                text_overlay("tail", "a", 20.0, 1.0),
+            ],
+            vec![
+                text_overlay("head", "a", 9.0, 3.0),
+                text_overlay("end", "b", 4.0, 9.0),
+            ],
+        ]);
+        assert_eq!(
+            spans(&timeline),
+            vec![
+                ("x".to_string(), 8.0, 12.0, 0.0),
+                // Its first second went with the trimmed head of clip a.
+                ("head".to_string(), 0.0, 2.0, 1.0),
+                // On past the end of the main track, which the project
+                // lasts until.
+                ("end".to_string(), 14.0, 23.0, 0.0),
+            ]
+        );
+        assert_eq!(timeline.main_duration(), 15.0);
+        assert_eq!(timeline.duration(), 23.0);
+        assert!(timeline.has_visible_overlays());
+        assert!(
+            !with_tracks(vec![vec![text_overlay("x", "missing", 0.0, 1.0)]]).has_visible_overlays()
+        );
+    }
+
+    #[test]
+    fn video_overlays_count_as_used_materials_and_leave_with_them() {
+        let mut timeline = with_tracks(vec![
+            vec![
+                text_overlay("on-a", "a", 11.0, 1.0),
+                video_overlay("v3", "b", 0.0, 3),
+            ],
+            vec![video_overlay("v1", "b", 1.0, 1)],
+        ]);
+        assert_eq!(timeline.material_ids(), vec![1, 2, 3]);
+        assert!(timeline.uses_material(3));
+        assert!(timeline.remove_material(3));
+        assert_eq!(timeline.material_ids(), vec![1, 2]);
+        // Clip a goes with the overlay anchored to it, and the video of
+        // material 1, which empties the top track.
+        assert!(timeline.remove_material(1));
+        assert!(timeline.tracks.is_empty());
+        assert!(!timeline.remove_material(1));
+    }
+
+    #[test]
+    fn overlays_need_rendering_and_video_overlays_valid_ranges() {
+        let mut timeline = Timeline::from_materials(&[(7, 30.0)]);
+        let clip_id = timeline.clips[0].id.clone();
+        timeline.tracks = vec![OverlayTrack {
+            id: "t".into(),
+            kind: None,
+            items: vec![text_overlay("x", &clip_id, 1.0, 2.0)],
+        }];
+        assert_eq!(timeline.single_full_material(30.0), None);
+
+        let mut video = with_tracks(vec![vec![video_overlay("v", "a", 10.0, 3)]]);
+        assert!(video.validate(|_| Some(30.0), |_| None).is_ok());
+        // Shows 1-4 of material 3, which is only 3.2 s long.
+        assert!(video
+            .validate(|id| Some(if id == 3 { 3.2 } else { 30.0 }), |_| None)
+            .is_err());
+        assert!(video
+            .validate(|id| (id != 3).then_some(30.0), |_| None)
+            .is_err());
+        if let OverlayContent::Video(v) = &mut video.tracks[0].items[0].content {
+            v.element.width = 0.0;
+        }
+        assert!(video.validate(|_| Some(30.0), |_| None).is_err());
+    }
+
+    #[test]
+    fn tracks_hold_only_what_their_kind_does() {
+        let mut timeline = with_tracks(vec![vec![
+            video_overlay("v", "a", 10.0, 3),
+            text_overlay("x", "a", 15.0, 2.0),
+        ]]);
+        // Tracks from before kinds may hold both.
+        assert!(timeline.validate(|_| Some(30.0), |_| None).is_ok());
+        timeline.tracks[0].kind = Some(TrackKind::Video);
+        assert!(timeline.validate(|_| Some(30.0), |_| None).is_err());
+        timeline.tracks[0].items.pop();
+        assert!(timeline.validate(|_| Some(30.0), |_| None).is_ok());
+        let json = timeline.to_json();
+        assert!(json.contains(r#""kind":"video","items""#));
+        assert_eq!(Timeline::parse(&json).unwrap(), timeline);
+    }
+
+    fn sound(id: &str, clip_id: &str, start: f64, duration: f64, source: AudioSource) -> AudioItem {
+        AudioItem {
+            id: id.into(),
+            clip_id: clip_id.into(),
+            start,
+            duration,
+            source,
+            source_start: 1.0,
+            volume: 0.5,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }
+    }
+
+    fn music(id: &str, clip_id: &str, start: f64, duration: f64) -> AudioItem {
+        sound(
+            id,
+            clip_id,
+            start,
+            duration,
+            AudioSource::File { audio_id: 9 },
+        )
+    }
+
+    fn with_audio(tracks: Vec<Vec<AudioItem>>) -> Timeline {
+        Timeline {
+            audio_tracks: tracks
+                .into_iter()
+                .enumerate()
+                .map(|(index, items)| AudioTrack {
+                    id: format!("a{index}"),
+                    items,
+                })
+                .collect(),
+            ..timeline()
+        }
+    }
+
+    fn heard(timeline: &Timeline) -> Vec<(String, f64, f64, f64)> {
+        timeline
+            .placed_audio()
+            .iter()
+            .map(|p| (p.item.id.clone(), p.start, p.end, p.skip))
+            .collect()
+    }
+
+    #[test]
+    fn audio_and_clip_volumes_are_saved_and_timelines_without_them_as_before() {
+        let json = r#"{"version":1,"clips":[{"id":"c","material_id":1,"start":0.0,"end":9.0,"volume":0.25}],
+            "subtitles":[],"danmu":false,"audio_tracks":[{"id":"t","items":[
+            {"id":"m","clip_id":"c","start":1.0,"duration":4.0,"kind":"file","audio_id":3,
+             "source_start":2.0,"volume":0.5,"fade_in":1.5,"fade_out":0.5},
+            {"id":"v","clip_id":"c","start":6.0,"duration":2.0,"kind":"material","material_id":4,
+             "source_start":0.0,"volume":1.0}]}]}"#;
+        let timeline = Timeline::parse(json).unwrap();
+        assert_eq!(timeline.clips[0].volume, 0.25);
+        let items = &timeline.audio_tracks[0].items;
+        assert_eq!(items[0].source, AudioSource::File { audio_id: 3 });
+        assert_eq!((items[0].fade_in, items[0].fade_out), (1.5, 0.5));
+        assert_eq!(items[1].material_id(), Some(4));
+        let reparsed: serde_json::Value = serde_json::from_str(&timeline.to_json()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(reparsed, original);
+        // Clips at full volume and timelines without audio tracks are saved
+        // as before, so their render hashes stay the same.
+        let plain = Timeline::from_materials(&[(1, 9.0)]).to_json();
+        assert!(!plain.contains("volume") && !plain.contains("audio_tracks"));
+        let clip = r#"{"id":"c","material_id":1,"start":0.0,"end":9.0}"#;
+        let clip: TimelineClip = serde_json::from_str(clip).unwrap();
+        assert_eq!(clip.volume, 1.0);
+    }
+
+    #[test]
+    fn audio_follows_its_clip_like_an_overlay() {
+        // a shows 10-20 at 0-10, b shows 0-5 at 10-15.
+        let timeline = with_audio(vec![
+            vec![music("x", "a", 18.0, 4.0)],
+            vec![music("head", "a", 9.0, 3.0), music("end", "b", 4.0, 9.0)],
+            vec![music("gone", "a", 20.0, 1.0)],
+        ]);
+        assert_eq!(
+            heard(&timeline),
+            vec![
+                ("x".to_string(), 8.0, 12.0, 0.0),
+                ("head".to_string(), 0.0, 2.0, 1.0),
+                ("end".to_string(), 14.0, 23.0, 0.0),
+            ]
+        );
+        assert_eq!(timeline.duration(), 23.0);
+    }
+
+    #[test]
+    fn audio_of_a_removed_clip_plays_on_over_the_clip_after_it() {
+        // a shows 10-20 at 0-10, b shows 0-5 at 10-15.
+        let mut timeline = with_audio(vec![
+            vec![
+                // Heard from 5 s into clip a.
+                music("inside", "a", 15.0, 8.0),
+                // Its first 2 s are cut off with the head of clip a.
+                music("head", "a", 8.0, 5.0),
+                music("on-b", "b", 1.0, 2.0),
+            ],
+            vec![sound(
+                "of-a",
+                "b",
+                0.0,
+                3.0,
+                AudioSource::Material { material_id: 1 },
+            )],
+        ]);
+        assert!(timeline.remove_material(1));
+        let items = &timeline.audio_tracks[0].items;
+        let placed: Vec<_> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.id.as_str(),
+                    item.clip_id.as_str(),
+                    item.start,
+                    item.source_start,
+                    item.duration,
+                )
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                ("inside", "b", 0.0, 1.0, 8.0),
+                ("head", "b", 0.0, 3.0, 3.0),
+                ("on-b", "b", 1.0, 1.0, 2.0),
+            ]
+        );
+        // The sound of material 1 went with it, and its track too.
+        assert_eq!(timeline.audio_tracks.len(), 1);
+
+        // With no clip after it, the sound goes with its clip.
+        let mut last = with_audio(vec![vec![music("x", "b", 1.0, 2.0)]]);
+        assert!(last.remove_material(2));
+        assert!(last.audio_tracks.is_empty());
+    }
+
+    #[test]
+    fn audio_files_and_materials_heard_are_used_and_leave_with_them() {
+        let mut timeline = with_audio(vec![vec![
+            music("x", "a", 11.0, 1.0),
+            sound("y", "b", 0.0, 1.0, AudioSource::Material { material_id: 5 }),
+        ]]);
+        assert_eq!(timeline.material_ids(), vec![1, 2, 5]);
+        assert_eq!(timeline.audio_ids(), vec![9]);
+        assert!(timeline.uses_audio(9) && !timeline.uses_audio(5));
+        assert!(timeline.remove_audio(9));
+        assert!(!timeline.remove_audio(9));
+        assert!(timeline.remove_material(5));
+        assert!(timeline.audio_tracks.is_empty());
+    }
+
+    #[test]
+    fn audio_files_deleted_by_the_backend_leave_the_edited_timeline() {
+        let base = with_audio(vec![vec![music("x", "a", 11.0, 1.0)]]);
+        let saved = timeline();
+        let mut edited = base.clone();
+        edited.audio_tracks[0].items[0].volume = 1.0;
+        edited.merge_saved_edits(&base, &saved);
+        assert!(edited.audio_tracks.is_empty());
+    }
+
+    #[test]
+    fn audio_needs_rendering_and_valid_ranges_and_volumes() {
+        let mut timeline = Timeline::from_materials(&[(7, 30.0)]);
+        timeline.clips[0].volume = 0.5;
+        assert_eq!(timeline.single_full_material(30.0), None);
+        timeline.clips[0].volume = 1.0;
+        let clip_id = timeline.clips[0].id.clone();
+        timeline.audio_tracks = vec![AudioTrack {
+            id: "t".into(),
+            items: vec![music("x", &clip_id, 1.0, 2.0)],
+        }];
+        assert_eq!(timeline.single_full_material(30.0), None);
+
+        let materials = |_| Some(30.0);
+        let audio = with_audio(vec![vec![music("x", "a", 10.0, 3.0)]]);
+        assert!(audio.validate(materials, |_| Some(4.0)).is_ok());
+        // Plays 1-4 of a file 3.2 s long.
+        assert!(audio.validate(materials, |_| Some(3.2)).is_err());
+        assert!(audio.validate(materials, |_| None).is_err());
+        let mut loud = audio.clone();
+        loud.audio_tracks[0].items[0].volume = 1.5;
+        assert!(loud.validate(materials, |_| Some(4.0)).is_err());
+        let mut fade = audio.clone();
+        fade.audio_tracks[0].items[0].fade_in = f64::NAN;
+        assert!(fade.validate(materials, |_| Some(4.0)).is_err());
+        let mut clip = audio.clone();
+        clip.clips[1].volume = -0.1;
+        assert!(clip.validate(materials, |_| Some(4.0)).is_err());
+        // The sound of a material is checked against the material.
+        let of_material = with_audio(vec![vec![sound(
+            "y",
+            "a",
+            10.0,
+            3.0,
+            AudioSource::Material { material_id: 3 },
+        )]]);
+        assert!(of_material
+            .validate(|id| Some(if id == 3 { 3.2 } else { 30.0 }), |_| None)
+            .is_err());
     }
 
     #[test]

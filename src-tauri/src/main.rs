@@ -611,6 +611,21 @@ fn get_migrations() -> Vec<Migration> {
         },
         Migration {
             version: 23,
+            description: "add_audio_files",
+            sql: r"
+                CREATE TABLE audio_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT '',
+                    file TEXT NOT NULL,
+                    duration REAL NOT NULL DEFAULT 0,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+            ",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 24,
             description: "add_automation_tables",
             sql: r#"
                 CREATE TABLE IF NOT EXISTS automation_analysis (
@@ -683,6 +698,7 @@ fn get_migrations() -> Vec<Migration> {
     ]
 }
 
+
 /// 清除自动化分支占用的冲突迁移记录，保留其数据表并允许合并后的迁移补齐主线结构。
 async fn reconcile_legacy_automation_migrations(
     pool: &sqlx::SqlitePool,
@@ -696,6 +712,19 @@ async fn reconcile_legacy_automation_migrations(
     .await?;
     if !migration_table_exists {
         return Ok(false);
+    }
+
+    // 清理旧开发分支占用 23 版本的记录，避免与主线 23 (add_audio_files) 冲突
+    let has_legacy_23: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = 23 AND description = 'add_automation_tables')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if has_legacy_23 {
+        let _ = sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 23 AND description = 'add_automation_tables'")
+            .execute(pool)
+            .await;
     }
 
     let rows = sqlx::query(

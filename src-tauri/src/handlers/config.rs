@@ -262,25 +262,28 @@ pub async fn update_notify(
     clip_notify: bool,
     post_notify: bool,
 ) -> Result<(), ()> {
-    state.config.write().await.live_start_notify = live_start_notify;
-    state.config.write().await.live_end_notify = live_end_notify;
-    state.config.write().await.clip_notify = clip_notify;
-    state.config.write().await.post_notify = post_notify;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.live_start_notify = live_start_notify;
+    config.live_end_notify = live_end_notify;
+    config.clip_notify = clip_notify;
+    config.post_notify = post_notify;
+    config.save();
     Ok(())
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn update_whisper_model(state: state_type!(), whisper_model: String) -> Result<(), ()> {
-    state.config.write().await.whisper_model = whisper_model;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.whisper_model = whisper_model;
+    config.save();
     Ok(())
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn update_subtitle_setting(state: state_type!(), auto_subtitle: bool) -> Result<(), ()> {
-    state.config.write().await.auto_subtitle = auto_subtitle;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.auto_subtitle = auto_subtitle;
+    config.save();
     Ok(())
 }
 
@@ -289,16 +292,45 @@ pub async fn update_clip_name_format(
     state: state_type!(),
     clip_name_format: String,
 ) -> Result<(), ()> {
-    state.config.write().await.clip_name_format = clip_name_format;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.clip_name_format = clip_name_format;
+    config.save();
     Ok(())
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn update_whisper_prompt(state: state_type!(), whisper_prompt: String) -> Result<(), ()> {
-    state.config.write().await.whisper_prompt = whisper_prompt;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.whisper_prompt = whisper_prompt;
+    config.save();
     Ok(())
+}
+
+/// Save the PowerLive hotwords and return them as stored.
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn update_powerlive_hotwords(
+    state: state_type!(),
+    hotwords: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let hotwords = crate::subtitle_generator::powerlive::normalize_hotwords(hotwords);
+    let mut config = state.config.write().await;
+    config.powerlive_hotwords = hotwords.clone();
+    config.try_save()?;
+    Ok(hotwords)
+}
+
+/// Save the PowerLive subtitle line length and return it as stored.
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn update_powerlive_sentence_max_length(
+    state: state_type!(),
+    sentence_max_length: u32,
+) -> Result<u32, String> {
+    let length =
+        crate::subtitle_generator::powerlive::clamp_sentence_max_length(sentence_max_length);
+    let mut config = state.config.write().await;
+    config.powerlive_sentence_max_length = length;
+    config.try_save()?;
+    Ok(length)
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
@@ -377,8 +409,11 @@ pub async fn update_whisper_language(
     whisper_language: String,
 ) -> Result<(), ()> {
     log::info!("Updating whisper language to {whisper_language}");
-    state.config.write().await.whisper_language = whisper_language;
-    state.config.write().await.save();
+    state
+        .config
+        .write()
+        .await
+        .set_whisper_language(&whisper_language);
     Ok(())
 }
 
@@ -392,8 +427,9 @@ pub async fn update_webhook_url(state: state_type!(), webhook_url: String) -> Re
             ..Default::default()
         })
         .await;
-    state.config.write().await.webhook_url = webhook_url;
-    state.config.write().await.save();
+    let mut config = state.config.write().await;
+    config.webhook_url = webhook_url;
+    config.save();
     Ok(())
 }
 

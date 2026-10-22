@@ -1,10 +1,8 @@
 import { invoke as tauri_invoke } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { fetch as tauri_fetch } from "@tauri-apps/plugin-http";
 import { open as tauri_open } from "@tauri-apps/plugin-shell";
 import { onOpenUrl as tauri_onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { createEventClient } from "./events";
-import type { Config } from "./interface";
 
 declare global {
   interface Window {
@@ -134,27 +132,28 @@ async function set_title(title: string) {
 }
 
 let STATIC_PORT = 0;
-let config: Config | null = null;
 
-async function get_static_url(base: string, path: string) {
-  if (config === null) {
-    config = (await invoke("get_config")) as any;
-  }
-  let staticUrl;
+async function static_origin() {
   if (TAURI_ENV) {
     if (STATIC_PORT === 0) {
       STATIC_PORT = await invoke("get_static_port");
     }
-    staticUrl = `http://localhost:${STATIC_PORT}`;
-  } else {
-    // In headless/web mode static assets are served by the same server as the
-    // API, so follow the configured endpoint as-is. Rewriting the port here
-    // breaks remapped ports, reverse proxies and HTTPS.
-    staticUrl = ENDPOINT;
+    return `http://localhost:${STATIC_PORT}`;
   }
+  // In headless/web mode static assets are served by the same server as the
+  // API, so follow the configured endpoint as-is. Rewriting the port here
+  // breaks remapped ports, reverse proxies and HTTPS.
+  return ENDPOINT;
+}
 
+async function get_static_url(base: string, path: string) {
   const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  return `${staticUrl}/${base}/${encodedPath}`;
+  return `${await static_origin()}/${base}/${encodedPath}`;
+}
+
+/** Chunk `chunk` of the sound of `file`, relative to the output directory, for the project preview. */
+async function get_preview_audio_url(file: string, chunk: number) {
+  return `${await static_origin()}/preview_audio?file=${encodeURIComponent(file)}&chunk=${chunk}`;
 }
 
 const { listen } = createEventClient({ tauri: TAURI_ENV, endpoint: ENDPOINT });
@@ -164,13 +163,6 @@ async function open(url: string) {
     return await tauri_open(url);
   }
   window.open(url, "_blank");
-}
-
-async function close_window() {
-  if (TAURI_ENV) {
-    return await getCurrentWebviewWindow().close();
-  }
-  window.close();
 }
 
 async function onOpenUrl(func: (urls: string[]) => void) {
@@ -188,8 +180,8 @@ export {
   listen,
   open,
   log,
-  close_window,
   onOpenUrl,
   get_static_url,
+  get_preview_audio_url,
   normalizeEndpoint,
 };

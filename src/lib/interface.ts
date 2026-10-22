@@ -1,4 +1,5 @@
 import { invoke } from "../lib/invoker";
+import type { StickerElement, TextElement } from "./cover-elements";
 
 // #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
 // pub struct RoomInfo {
@@ -100,6 +101,8 @@ export interface TimelineClip {
   start: number;
   /** Out point within the material, in seconds. */
   end: number;
+  /** Of the material's own sound, 0 to 1; full when absent. */
+  volume?: number;
 }
 
 /** A subtitle anchored to a clip, timed in that clip's material time. */
@@ -111,14 +114,142 @@ export interface TimelineSubtitle {
   text: string;
 }
 
+/**
+ * Something drawn over the main track. Like a subtitle it is anchored to the
+ * clip it starts over, in that clip's material time, so it follows the
+ * picture when clips move or are trimmed; its length is free and may run on
+ * over later clips.
+ */
+interface OverlayBase {
+  id: string;
+  clip_id: string;
+  /** Where it starts, in the anchor clip's material time. */
+  start: number;
+  /** Length in project time. */
+  duration: number;
+}
+
+export interface TextOverlay extends OverlayBase {
+  kind: "text";
+  /** Drawn as on a cover, on the 1920×1080 picture; its `id` is unused. */
+  element: TextElement;
+}
+
+export interface StickerOverlay extends OverlayBase {
+  kind: "sticker";
+  /** As on a cover, except that `src` is a sticker reference such as `builtin:1f600`. */
+  element: StickerElement;
+}
+
+/** Where a video overlay sits on the 1920×1080 picture. */
+export interface VideoPlacement {
+  /** Center. */
+  x: number;
+  y: number;
+  /** The height follows the material's aspect ratio. */
+  width: number;
+  /** Degrees, clockwise. */
+  rotation: number;
+}
+
+export interface VideoOverlay extends OverlayBase {
+  kind: "video";
+  material_id: number;
+  /** Material time shown at the overlay's start. */
+  source_start: number;
+  /** 0 to 1. */
+  volume: number;
+  /** 0 to 1; opaque when absent. */
+  opacity?: number;
+  element: VideoPlacement;
+}
+
+export type OverlayItem = TextOverlay | StickerOverlay | VideoOverlay;
+
+/** What a track above the main one holds: video overlays, or texts and stickers. */
+export type TrackKind = "video" | "sticker";
+
+/** A track above the main one; items on a track do not overlap in time. */
+export interface OverlayTrack {
+  id: string;
+  kind: TrackKind;
+  items: OverlayItem[];
+}
+
+/**
+ * Sound heard with the main track, anchored like an overlay to the clip it
+ * starts over.
+ */
+interface AudioBase extends OverlayBase {
+  /** Time in the source heard at the item's start. */
+  source_start: number;
+  /** 0 to 1. */
+  volume: number;
+  /**
+   * Seconds it fades in over from where it is first heard, and out over
+   * until where it is last heard; none when absent.
+   */
+  fade_in?: number;
+  fade_out?: number;
+}
+
+/** A file of the audio library. */
+export interface FileAudio extends AudioBase {
+  kind: "file";
+  audio_id: number;
+}
+
+/** The sound of a material, without its picture. */
+export interface MaterialAudio extends AudioBase {
+  kind: "material";
+  material_id: number;
+}
+
+export type AudioItem = FileAudio | MaterialAudio;
+
+/** A track below the main one; items on a track do not overlap in time. */
+export interface AudioTrack {
+  id: string;
+  items: AudioItem[];
+}
+
+/** A file of the audio library, shared by every project. */
+export interface AudioFile {
+  id: number;
+  name: string;
+  /** Relative to the output directory. */
+  file: string;
+  /** Seconds. */
+  duration: number;
+  size: number;
+  created_at: string;
+}
+
 export interface ProjectTimeline {
   version: number;
   /** The main track: clips play back to back. */
   clips: TimelineClip[];
   subtitles: TimelineSubtitle[];
+  /**
+   * Drawn over the main track, the bottom one first; a higher track covers
+   * lower ones. Video and sticker tracks come in any order.
+   */
+  tracks: OverlayTrack[];
   subtitle_style?: SubtitleStyle | null;
   /** Burn the materials' danmaku when exporting. */
   danmu: boolean;
+  /** Heard with the main track, the top one, nearest it, first. */
+  audio_tracks: AudioTrack[];
+}
+
+/** A text or sticker overlay drawn by the editor, which the export burns in. */
+export interface OverlayImage {
+  id: string;
+  /** PNG data URL. */
+  image: string;
+  /** Top left on the 1920×1080 picture. */
+  x: number;
+  y: number;
 }
 
 /** A project (切片) as listed by the backend. */
@@ -285,6 +416,8 @@ export interface Config {
   subtitle_generator_type: string;
   whisper_model: string;
   whisper_prompt: string;
+  powerlive_hotwords: string[];
+  powerlive_sentence_max_length: number;
   openai_api_endpoint: string;
   openai_api_key: string;
   clip_name_format: string;
@@ -427,10 +560,6 @@ export interface ClipRangeParams {
 
 export function generateEventId() {
   return Math.random().toString(36).substring(2, 15);
-}
-
-export async function clipRange(eventId: string, params: ClipRangeParams) {
-  return await invoke("clip_range", { eventId, params });
 }
 
 /** Cut each range into its own material, optionally in a new project. */

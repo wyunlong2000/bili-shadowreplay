@@ -6,7 +6,8 @@ use crate::database::{Database, DatabaseError};
 use crate::events::{DataChange, EventBus};
 use crate::ffmpeg::{clip_timeline_anchors, transcode, Range};
 use crate::progress::progress_reporter::{ProgressReporter, ProgressReporterTrait};
-use crate::subtitle_generator::{item_to_srt, SubtitleGeneratorType};
+use crate::safe_path::join_relative;
+use crate::subtitle_generator::{item_to_srt, powerlive::PowerLiveOptions, SubtitleGeneratorType};
 use crate::task::{Task, TaskManager, TaskPriority};
 use crate::webhook::events::{self, Payload};
 use crate::webhook::poster::WebhookPoster;
@@ -167,6 +168,12 @@ async fn live_end_parent_id(
         .iter()
         .any(|record| record.platform == platform.as_str() && record.size > 0)
         .then_some(parent_id))
+}
+
+/// Map an HLS request path (`platform/room_id/live_id/...`) to a file in
+/// `cache_dir`, never outside it: see [`join_relative`].
+fn resolve_hls_path(cache_dir: &Path, path: &str) -> Option<PathBuf> {
+    join_relative(cache_dir, &path.replace("%7C", "|"))
 }
 
 impl RecorderManager {
@@ -1477,10 +1484,29 @@ impl RecorderManager {
         }
         log::info!("[{}]Temp clip file generated: {}", room_id, clip_file_path);
 
-        // Read config to determine generator type
-        let config = self.config.read().await;
-        let generator_type = SubtitleGeneratorType::parse(&config.subtitle_generator_type)
-            .map_err(|error| RecorderManagerError::SubtitleGenerationFailed { error })?;
+        // Copy the settings out so no config guard is held across the ffmpeg
+        // and subtitle jobs below.
+        let (
+            generator_type,
+            whisper_model,
+            whisper_prompt,
+            openai_api_key,
+            openai_api_endpoint,
+            whisper_language,
+            powerlive,
+        ) = {
+            let config = self.config.read().await;
+            (
+                SubtitleGeneratorType::parse(&config.subtitle_generator_type)
+                    .map_err(|error| RecorderManagerError::SubtitleGenerationFailed { error })?,
+                config.whisper_model.clone(),
+                config.whisper_prompt.clone(),
+                config.openai_api_key.clone(),
+                config.openai_api_endpoint.clone(),
+                config.whisper_language.clone(),
+                PowerLiveOptions::new(&self.db, &config),
+            )
+        };
 
         // For third-party services (powerlive), extract opus audio from mp4
         let media_file_path = if generator_type.is_powerlive() {
@@ -1525,12 +1551,12 @@ impl RecorderManager {
             Path::new(&media_file_path.full_path()),
             generator_type,
             &resource_dir,
-            &config.whisper_model,
-            &config.whisper_prompt,
-            &config.openai_api_key,
-            &config.openai_api_endpoint,
-            &config.whisper_language,
-            Some(&self.db),
+            &whisper_model,
+            &whisper_prompt,
+            &openai_api_key,
+            &openai_api_endpoint,
+            &whisper_language,
+            Some(powerlive),
         )
         .await;
         // write subtitle file
@@ -1607,6 +1633,13 @@ impl RecorderManager {
                 err: "Invalid hls path".into(),
             });
         }
+        // Resolve before branching so room_id / live_id are vetted for playlists too.
+        let Some(file_path) = resolve_hls_path(Path::new(&cache_path), path) else {
+            log::warn!("Rejected request path outside the cache dir: {path}");
+            return Err(RecorderManagerError::HLSError {
+                err: "Invalid hls path".into(),
+            });
+        };
         // parse recorder type
         let platform = path_segs[0];
         // parse room id
@@ -1680,12 +1713,9 @@ impl RecorderManager {
             Ok(bytes)
         } else {
             // try to find requested ts file in recorder's cache
-            // cache files are stored in {cache_dir}/{room_id}/{timestamp}/{ts_file}
-            // remove path params
-            let path = path.split('?').next().unwrap_or(path);
-            let ts_file = format!("{}/{}", cache_path, path.replace("%7C", "|"));
-            let ts_file_content = tokio::fs::read(&ts_file).await.map_err(|e| {
-                log::warn!("Failed to read segment file {ts_file}: {e}");
+            // cache files are stored in {cache_dir}/{platform}/{room_id}/{live_id}/{ts_file}
+            let ts_file_content = tokio::fs::read(&file_path).await.map_err(|e| {
+                log::warn!("Failed to read segment file {}: {e}", file_path.display());
                 RecorderManagerError::HLSError {
                     err: "Segment file not found".into(),
                 }
@@ -2006,5 +2036,85 @@ mod live_end_tests {
             .unwrap(),
             Some("session-1".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod hls_path_tests {
+    use super::*;
+
+    /// A temp dir holding `cache/` with a few segments, plus `secret.txt` just outside it.
+    fn cache_with_outside_secret() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(cache.join("bilibili/1/2/some_dir")).unwrap();
+        std::fs::write(cache.join("bilibili/1/2/segment.ts"), "segment").unwrap();
+        std::fs::write(cache.join("bilibili/1/2/some_dir/segment.ts"), "nested").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "secret").unwrap();
+        (dir, cache)
+    }
+
+    #[test]
+    fn resolves_segment_paths_inside_the_cache_dir() {
+        let (_dir, cache) = cache_with_outside_secret();
+        for (path, content) in [
+            ("bilibili/1/2/segment.ts", "segment"),
+            ("bilibili/1/2/some_dir/segment.ts", "nested"),
+        ] {
+            let resolved = resolve_hls_path(&cache, path).unwrap();
+            assert_eq!(std::fs::read_to_string(resolved).unwrap(), content);
+        }
+        assert_eq!(
+            resolve_hls_path(&cache, "bilibili/1/2/a%7Cb.ts"),
+            Some(cache.join("bilibili/1/2/a|b.ts"))
+        );
+    }
+
+    #[test]
+    fn rejects_paths_escaping_the_cache_dir() {
+        let (dir, cache) = cache_with_outside_secret();
+        let absolute = dir.path().join("secret.txt").to_string_lossy().into_owned();
+        for path in [
+            // What axum's `Path` extractor yields for `..%2F..%2F..%2F..%2Fsecret.txt`,
+            // and what a raw `curl --path-as-is` request carries.
+            "bilibili/1/2/../../../../secret.txt".to_string(),
+            // Room and live ids are path segments too.
+            "bilibili/../../secret.txt".to_string(),
+            "bilibili/1/2/./segment.ts".to_string(),
+            "bilibili/1/2//segment.ts".to_string(),
+            // Windows trims trailing dots and spaces, so these could act as `..`.
+            "bilibili/1/2/.. /.. /.. /.. /secret.txt".to_string(),
+            "bilibili/1/2/.. ./secret.txt".to_string(),
+            "bilibili/1/2/.../secret.txt".to_string(),
+            absolute.clone(),
+            format!("bilibili/1/2/{absolute}"),
+        ] {
+            let resolved = resolve_hls_path(&cache, &path);
+            let leaked = resolved
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok());
+            assert_eq!(
+                resolved, None,
+                "{path:?} must be rejected (reads {leaked:?})"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_separators_and_prefixes() {
+        let (_dir, cache) = cache_with_outside_secret();
+        for path in [
+            "bilibili\\..\\..\\secret.txt",
+            "bilibili/1/2/C:",
+            "bilibili/1/2/C:\\secret.txt",
+            "bilibili/1/2/.. \\/.. \\/secret.txt",
+        ] {
+            assert_eq!(
+                resolve_hls_path(&cache, path),
+                None,
+                "{path:?} must be rejected"
+            );
+        }
     }
 }

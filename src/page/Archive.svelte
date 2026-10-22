@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { formatTimecode } from "../lib/time-format";
+  import { formatSize } from "../lib/size-format";
+  import { liveRoomUrl, platformLabel } from "../lib/platform";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
   import { invoke, get_static_url } from "../lib/invoker";
   import type { RecordItem, RecordSummaryStatus } from "../lib/db";
@@ -260,15 +263,6 @@
   }
 
   /**
-   * 跳转到指定页面
-   */
-  function goToPage(page: number) {
-    if (page < 1 || page > totalPages || page === currentPage) return;
-    currentPage = page;
-    applyFilters();
-  }
-
-  /**
    * 上一页
    */
   function prevPage() {
@@ -370,96 +364,9 @@
     archives = filtered;
   }
 
-  function formatSize(size: number) {
-    if (size < 1024) {
-      return `${size} B`;
-    } else if (size < 1024 * 1024) {
-      return `${(size / 1024).toFixed(2)} KiB`;
-    } else if (size < 1024 * 1024 * 1024) {
-      return `${(size / 1024 / 1024).toFixed(2)} MiB`;
-    } else {
-      return `${(size / 1024 / 1024 / 1024).toFixed(2)} GiB`;
-    }
-  }
-
-  function formatDuration(seconds: number) {
-    seconds = Math.round(seconds);
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-    } else {
-      return `${minutes}:${secs.toString().padStart(2, "0")}`;
-    }
-  }
-
   function formatDate(dateString: string) {
     const date = new Date(dateString);
     return date.toLocaleString();
-  }
-
-  function formatPlatform(platform: string) {
-    switch (platform.toLowerCase()) {
-      case "bilibili":
-        return "B站";
-      case "douyin":
-        return "抖音";
-      case "douyu":
-        return "斗鱼";
-      case "huya":
-        return "虎牙";
-      case "kuaishou":
-        return "快手";
-      case "tiktok":
-        return "TikTok";
-      case "twitch":
-        return "Twitch";
-      case "youtube":
-        return "YouTube";
-      default:
-        return platform;
-    }
-  }
-
-  function getRoomUrl(platform: string, roomId: string) {
-    if (roomId.startsWith("http")) {
-      return roomId;
-    }
-    switch (platform.toLowerCase()) {
-      case "bilibili":
-        return `https://live.bilibili.com/${roomId}`;
-      case "douyin":
-        return `https://live.douyin.com/${roomId}`;
-      case "douyu":
-        return `https://www.douyu.com/${roomId}`;
-      case "huya":
-        return `https://www.huya.com/${roomId}`;
-      case "kuaishou":
-        return `https://live.kuaishou.com/u/${roomId}`;
-      case "tiktok":
-        return `https://www.tiktok.com/${roomId}/live`;
-      case "twitch":
-        return `https://www.twitch.tv/${roomId}`;
-      case "youtube":
-        if (roomId.startsWith("legacy-c-")) {
-          return `https://www.youtube.com/c/${roomId.slice(9)}/live`;
-        }
-        if (roomId.startsWith("legacy-user-")) {
-          return `https://www.youtube.com/user/${roomId.slice(12)}/live`;
-        }
-        if (/^[A-Za-z0-9_-]{11}$/.test(roomId)) {
-          return `https://www.youtube.com/watch?v=${roomId}`;
-        }
-        if (roomId.startsWith("UC")) {
-          return `https://www.youtube.com/channel/${roomId}/live`;
-        }
-        const handle = roomId.startsWith("@") ? roomId : `@${roomId}`;
-        return `https://www.youtube.com/${handle}/live`;
-      default:
-        return null;
-    }
   }
 
   function calcBitrate(size: number, duration: number) {
@@ -848,6 +755,7 @@
             </thead>
             <tbody class="divide-y divide-line">
               {#each filteredArchives as archive (getArchiveKey(archive))}
+                {@const roomUrl = liveRoomUrl(archive.platform, archive.room_id)}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-4 py-2.5">
                     <input
@@ -890,13 +798,13 @@
                       {:else}
                         <Globe class="h-4 w-4 text-fg-faint" />
                       {/if}
-                      {#if getRoomUrl(archive.platform, archive.room_id)}
+                      {#if roomUrl}
                         <a
-                          href={getRoomUrl(archive.platform, archive.room_id)}
+                          href={roomUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           class="text-[13px] text-accent-fg underline-offset-2 hover:underline"
-                          title={`打开 ${formatPlatform(archive.platform)} 直播间`}
+                          title={`打开 ${platformLabel(archive.platform)} 直播间`}
                         >
                           {archive.room_id}
                         </a>
@@ -927,7 +835,7 @@
                     <div class="flex items-center gap-1.5">
                       <Clock class="h-3.5 w-3.5 text-fg-faint" />
                       <span class="text-[13px] tabular-nums text-fg"
-                        >{formatDuration(archive.length)}</span
+                        >{formatTimecode(archive.length, 0)}</span
                       >
                     </div>
                   </td>

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { formatSize } from "../lib/size-format";
+  import { liveRoomUrl } from "../lib/platform";
   import { invoke, open, onOpenUrl, get_static_url, get } from "../lib/invoker";
   import { message } from "@tauri-apps/plugin-dialog";
   import { fade, scale } from "svelte/transition";
@@ -363,18 +365,6 @@
     return `${hours}:${minutes}:${seconds}`;
   }
 
-  function format_size(size: number) {
-    if (size < 1024) {
-      return `${size} B`;
-    } else if (size < 1024 * 1024) {
-      return `${(size / 1024).toFixed(2)} KiB`;
-    } else if (size < 1024 * 1024 * 1024) {
-      return `${(size / 1024 / 1024).toFixed(2)} MiB`;
-    } else {
-      return `${(size / 1024 / 1024 / 1024).toFixed(2)} GiB`;
-    }
-  }
-
   function calc_bitrate(size: number, duration: number) {
     return ((size * 8) / duration / 1024).toFixed(0);
   }
@@ -486,55 +476,16 @@
   }
 
   function openLiveUrl(room: RecorderInfo) {
-    switch (room.room_info.platform) {
-      case "bilibili":
-        open("https://live.bilibili.com/" + room.room_info.room_id);
-        break;
-      case "douyin":
-        if (room.identifier_type === "profile") {
-          if (room.room_resolved && room.web_rid) {
-            open("https://live.douyin.com/" + room.web_rid);
-          } else {
-            openUserUrl(room);
-          }
-        } else {
-          open("https://live.douyin.com/" + room.room_info.room_id);
-        }
-        break;
-      case "douyu":
-        open("https://www.douyu.com/" + room.room_info.room_id);
-        break;
-      case "huya":
-        open("https://www.huya.com/" + room.room_info.room_id);
-        break;
-      case "kuaishou":
-        open("https://live.kuaishou.com/u/" + room.room_info.room_id);
-        break;
-      case "tiktok":
-        open(`https://www.tiktok.com/${room.room_info.room_id}/live`);
-        break;
-      case "twitch":
-        open(`https://www.twitch.tv/${room.room_info.room_id}`);
-        break;
-      case "youtube":
-        if (room.room_info.room_id.startsWith("http")) {
-          open(room.room_info.room_id);
-        } else if (room.room_info.room_id.startsWith("legacy-c-")) {
-          open(`https://www.youtube.com/c/${room.room_info.room_id.slice(9)}/live`);
-        } else if (room.room_info.room_id.startsWith("legacy-user-")) {
-          open(`https://www.youtube.com/user/${room.room_info.room_id.slice(12)}/live`);
-        } else if (/^[A-Za-z0-9_-]{11}$/.test(room.room_info.room_id)) {
-          open(`https://www.youtube.com/watch?v=${room.room_info.room_id}`);
-        } else if (room.room_info.room_id.startsWith("UC")) {
-          open(`https://www.youtube.com/channel/${room.room_info.room_id}/live`);
-        } else {
-          const handle = room.room_info.room_id.startsWith("@")
-            ? room.room_info.room_id
-            : `@${room.room_info.room_id}`;
-          open(`https://www.youtube.com/${handle}/live`);
-        }
-        break;
+    if (room.room_info.platform === "douyin" && room.identifier_type === "profile") {
+      if (room.room_resolved && room.web_rid) {
+        open("https://live.douyin.com/" + room.web_rid);
+      } else {
+        openUserUrl(room);
+      }
+      return;
     }
+    const url = liveRoomUrl(room.room_info.platform, room.room_info.room_id);
+    if (url) open(url);
   }
 
   function addNewRecorder(room_id: string, platform: string) {
@@ -1177,7 +1128,7 @@
                       >{format_duration(archive.length)}</td
                     >
                     <td class="px-4 py-3 text-sm text-gray-900 dark:text-white"
-                      >{format_size(archive.size)}</td
+                      >{formatSize(archive.size)}</td
                     >
                     <td
                       class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400"

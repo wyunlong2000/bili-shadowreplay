@@ -13,10 +13,12 @@
 <script lang="ts">
   import { Film, Plus, Search } from "lucide-svelte";
   import { MATERIAL_DRAG_TYPE } from "./ProjectTimeline.svelte";
+  import { formatTimecode } from "../../time-format";
 
   interface Props {
     materials: BinMaterial[];
     roomId: string;
+    /** Add it at the playhead. */
     onAdd: (material: BinMaterial) => void;
     onPreview: (material: BinMaterial) => void;
   }
@@ -39,16 +41,6 @@
       )
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   });
-
-  function formatDuration(seconds: number) {
-    const total = Math.round(seconds);
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const secs = total % 60;
-    return hours > 0
-      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
-      : `${minutes}:${String(secs).padStart(2, "0")}`;
-  }
 
   function dragStart(event: DragEvent, material: BinMaterial) {
     event.dataTransfer?.setData(MATERIAL_DRAG_TYPE, String(material.id));
@@ -78,7 +70,7 @@
         role="listitem"
         draggable="true"
         ondragstart={(event) => dragStart(event, material)}
-        title="拖到时间轴上插入，或点击 ＋ 添加到末尾"
+        title="拖到主轨上插入、拖到其他视频轨道上叠加在画面上、拖到音频轨道上只用它的声音，或点击 ＋ 在播放头处添加"
       >
         <button type="button" class="thumb" onclick={() => onPreview(material)} title="预览素材">
           {#if material.coverUrl}
@@ -86,13 +78,13 @@
           {:else}
             <Film class="h-4 w-4 text-[#6f7b8d]" />
           {/if}
-          <span class="length">{formatDuration(material.duration)}</span>
+          <span class="length">{formatTimecode(material.duration, 0)}</span>
         </button>
         <div class="meta">
           <span class="name" title={material.name}>{material.name}</span>
           <span class="note" title={material.note}>{material.note || material.roomId}</span>
         </div>
-        <button type="button" class="add" title="添加到时间轴末尾" onclick={() => onAdd(material)}>
+        <button type="button" class="add" title="在播放头处添加" onclick={() => onAdd(material)}>
           <Plus class="h-3.5 w-3.5" />
         </button>
       </div>

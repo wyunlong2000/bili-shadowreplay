@@ -1,19 +1,12 @@
 <script lang="ts">
   import {
-    AlignCenter,
-    AlignLeft,
-    AlignRight,
     ArrowDown,
     ArrowUp,
-    Bold,
     Copy,
     Film,
-    FlipHorizontal2,
     ImageUp,
     Loader2,
-    MoveDiagonal2,
     Redo2,
-    RotateCw,
     Smile,
     Trash2,
     Type,
@@ -22,21 +15,20 @@
     ZoomIn,
     ZoomOut,
   } from "lucide-svelte";
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     aspectOf,
     clamp,
     clampFrame,
     COVER_SIZES,
     defaultFrame,
+    dragChanges,
+    ELEMENT_MIDDLE,
     ELEMENT_SPACE,
     elementArea,
     elementAt,
     elementSize,
-    fontFamily,
     frameRect,
-    layoutText,
-    LINE_HEIGHT,
     MAX_ZOOM,
     minZoom,
     newSticker,
@@ -45,8 +37,6 @@
     reorder,
     scaledSize,
     sceneOf,
-    snapRotation,
-    snapToCenter,
     styleOf,
     TEXT_STYLES,
     zoomFrame,
@@ -59,18 +49,21 @@
     type TextStyle,
   } from "../../cover-elements";
   import { invoke, log } from "../../invoker";
-  import ColorPicker from "./ColorPicker.svelte";
-  import CoverFontSelect from "./CoverFontSelect.svelte";
+  import ElementToolbar from "./ElementToolbar.svelte";
   import {
+    frameScheduler,
     isCrossOrigin,
     loadSticker,
     measure,
     prepareBackground,
+    redrawWhenLoaded,
     renderCover,
     STICKER_GROUPS,
     type Background,
   } from "./render";
+  import SelectionBox from "./SelectionBox.svelte";
   import StickerPanel from "./StickerPanel.svelte";
+  import TextEditField from "./TextEditField.svelte";
   import TextPanel from "./TextPanel.svelte";
 
   interface Props {
@@ -131,11 +124,9 @@
   let ctx: CanvasRenderingContext2D | null = null;
   let stageArea: HTMLDivElement = $state();
   let surface: HTMLDivElement = $state();
-  let editField: HTMLDivElement = $state();
   let previews: Partial<Record<Ratio, HTMLCanvasElement>> = $state({});
   let fileInput: HTMLInputElement = $state();
   let stageSize = $state({ width: 0, height: 0 });
-  let frameRequest: number | null = null;
 
   let size = $derived(COVER_SIZES[ratio]);
   let view = $derived(frameRect(scene, aspectOf(ratio), frames[ratio]));
@@ -175,7 +166,7 @@
     scheduleRedraw();
     return () => {
       observer.disconnect();
-      if (frameRequest !== null) cancelAnimationFrame(frameRequest);
+      cancelRedraw();
       clearTimeout(commitTimer);
     };
   });
@@ -201,13 +192,7 @@
     });
   });
 
-  function scheduleRedraw() {
-    if (frameRequest !== null) return;
-    frameRequest = requestAnimationFrame(() => {
-      frameRequest = null;
-      redraw();
-    });
-  }
+  const { schedule: scheduleRedraw, cancel: cancelRedraw } = frameScheduler(redraw);
 
   function viewOf(r: Ratio) {
     return frameRect(scene, aspectOf(r), frames[r]);
@@ -220,12 +205,7 @@
       const preview = previews[r]?.getContext("2d");
       if (preview) pending.push(...renderCover(preview, scene, viewOf(r), background, elementArea(r), covers[r]));
     }
-    if (pending.length) {
-      // Only redraw for stickers that arrived, or a failed one would loop.
-      void Promise.all(pending.map((request) => request.then(() => true, () => false))).then(
-        (loaded) => loaded.some(Boolean) && scheduleRedraw(),
-      );
-    }
+    redrawWhenLoaded(pending, scheduleRedraw);
   }
 
   const otherRatio = (r: Ratio): Ratio => (r === "home" ? "wide" : "home");
@@ -412,9 +392,6 @@
 
   // Elements
 
-  /** The middle of both covers, where new elements go. */
-  const MIDDLE = { x: ELEMENT_SPACE.width / 2, y: ELEMENT_SPACE.height / 2 };
-
   /** Unique across both covers, so only twins share an id. */
   const newId = () => nextId([...covers.home, ...covers.wide]);
 
@@ -436,10 +413,10 @@
 
   function addText(style: TextStyle = lastStyle, font = lastFont) {
     pictureSelected = false;
-    const text = { ...newText(elements, MIDDLE, style, font), id: newId() };
+    const text = { ...newText(elements, ELEMENT_MIDDLE, style, font), id: newId() };
     add(text);
     // Committed when its first edit finishes.
-    void startEditing(text.id, true);
+    startEditing(text.id, true);
   }
 
   async function addSticker(src: string, size?: number) {
@@ -451,7 +428,7 @@
       return;
     }
     const element = {
-      ...newSticker(elements, MIDDLE, src, image.naturalWidth / image.naturalHeight || 1, size),
+      ...newSticker(elements, ELEMENT_MIDDLE, src, image.naturalWidth / image.naturalHeight || 1, size),
       id: newId(),
     };
     add(element);
@@ -519,61 +496,40 @@
     { id: "sticker", label: "贴纸", icon: Smile },
   ] as const;
 
-  const ALIGNMENTS = [
-    { value: "left", label: "左对齐", icon: AlignLeft },
-    { value: "center", label: "居中", icon: AlignCenter },
-    { value: "right", label: "右对齐", icon: AlignRight },
-  ] as const;
-
   // Text editing on the canvas
 
-  async function startEditing(id: number, selectAll = false) {
+  // What the edited text read at its last input; the field is read again when editing ends.
+  let editContent = "";
+  let editSelectAll = $state(false);
+  let editField: ReturnType<typeof TextEditField> | undefined = $state();
+
+  function startEditing(id: number, selectAll = false) {
     finishEditing();
     const element = elements.find((e) => e.id === id);
     if (element?.kind !== "text") return;
     selectedId = id;
+    editContent = element.content;
+    editSelectAll = selectAll;
     editingId = id;
-    await tick();
-    if (!editField) return;
-    try {
-      editField.contentEditable = "plaintext-only";
-    } catch {
-      // Older engines reject it; innerText still reads plain text.
-      editField.contentEditable = "true";
-    }
-    editField.textContent = element.content;
-    editField.focus();
-    const range = document.createRange();
-    range.selectNodeContents(editField);
-    if (!selectAll) range.collapse(false);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
   }
 
   function finishEditing() {
     const id = editingId;
     if (id === null) return;
-    const field = editField;
+    // As on screen, also when ended by a click elsewhere mid-composition.
+    const content = editField?.content() ?? editContent;
     editingId = null;
     const element = elements.find((e) => e.id === id);
-    if (element?.kind === "text" && field) {
-      const content = field.innerText.replace(/\r/g, "").replace(/\n$/, "");
+    if (element?.kind === "text") {
       if (content.trim()) change(element, { content });
       else remove(id);
     }
     commit();
   }
 
-  function handleEditKeydown(event: KeyboardEvent) {
-    if (event.isComposing) return;
-    if (event.key === "Escape" || (event.key === "Enter" && (event.metaKey || event.ctrlKey))) {
-      // Leave editing, not the editor.
-      event.preventDefault();
-      event.stopPropagation();
-      finishEditing();
-      surface.focus({ preventScroll: true });
-    }
+  function handleEditDone(byKey: boolean) {
+    finishEditing();
+    if (byKey) surface.focus({ preventScroll: true });
   }
 
   // Pointer interaction
@@ -681,27 +637,17 @@
     if (!element) return;
     const point = toCover(event);
     const origin = drag.origin;
+    const update = dragChanges(drag.mode, origin, drag.start, point, unit, {
+      moved: drag.moved,
+      snapStep: event.shiftKey ? 15 : undefined,
+    });
+    if (!update) return;
     let changes: ElementChanges;
-    if (drag.mode === "move") {
-      const dx = point.x - drag.start.x;
-      const dy = point.y - drag.start.y;
-      // A click selects without nudging.
-      if (!drag.moved && Math.hypot(dx, dy) * unit < 3) return;
-      const to = placeable({ x: origin.x + dx, y: origin.y + dy });
-      const snapped = snapToCenter(to.x, to.y, MIDDLE, 8 / unit);
-      changes = { x: Math.round(snapped.x), y: Math.round(snapped.y) };
-      guides = { x: snapped.snapX, y: snapped.snapY };
-    } else if (drag.mode === "rotate") {
-      const from = Math.atan2(drag.start.y - origin.y, drag.start.x - origin.x);
-      const to = Math.atan2(point.y - origin.y, point.x - origin.x);
-      changes = {
-        rotation: snapRotation(origin.rotation + ((to - from) * 180) / Math.PI, event.shiftKey ? 15 : undefined),
-      };
+    if ("scale" in update) {
+      changes = scaledSize(origin, update.scale);
     } else {
-      const factor =
-        Math.hypot(point.x - origin.x, point.y - origin.y) /
-        Math.max(1, Math.hypot(drag.start.x - origin.x, drag.start.y - origin.y));
-      changes = scaledSize(origin, factor);
+      changes = update.changes;
+      if ("guides" in update) guides = update.guides;
     }
     Object.assign(element, changes);
     // From where both started, so the twin does not drift.
@@ -728,7 +674,7 @@
 
   function handleDoubleClick(event: MouseEvent) {
     const hit = hitTest(event);
-    if (hit?.kind === "text") void startEditing(hit.id, true);
+    if (hit?.kind === "text") startEditing(hit.id, true);
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -763,7 +709,7 @@
       duplicate(selected);
     } else if (key === "enter" && selected.kind === "text") {
       event.preventDefault();
-      void startEditing(selected.id, true);
+      startEditing(selected.id, true);
     } else if (key.startsWith("arrow")) {
       event.preventDefault();
       const step = event.shiftKey ? 20 : 2;
@@ -894,109 +840,28 @@
           <TextPanel selected={selectedText} onAdd={() => addText()} onStyle={pickStyle} onFont={pickFont} />
         </div>
         <div class="min-h-full" class:hidden={panel !== "sticker"}>
-          <StickerPanel active={show && panel === "sticker"} bind:group={stickerGroup} onPick={addSticker} />
+          <StickerPanel
+            active={show && panel === "sticker"}
+            bind:group={stickerGroup}
+            onPick={(sticker, size) => addSticker(sticker.src, size)}
+          />
         </div>
       </div>
 
       <!-- Canvas -->
       <div class="flex min-w-0 flex-1 flex-col bg-sunken">
         <div class="flex min-h-[46px] shrink-0 flex-wrap items-center gap-1 border-b border-line bg-surface px-3 py-2">
-          {#if selectedText}
-            <CoverFontSelect
-              value={selectedText.font}
-              onSelect={(font) => {
+          {#if selectedText || selectedSticker}
+            <ElementToolbar
+              text={selectedText}
+              sticker={selectedSticker}
+              onUpdate={update}
+              onFont={(font) => {
                 lastFont = font;
                 change(selectedText, { font });
                 commit();
               }}
             />
-            <input
-              type="number"
-              min="12"
-              max="800"
-              value={selectedText.fontSize}
-              class="ui-input h-[26px] w-[66px] pr-1 tabular-nums"
-              title="字号"
-              aria-label="字号"
-              onchange={(event) => {
-                const size = Math.round(Number(event.currentTarget.value));
-                update({ fontSize: clamp(size || selectedText.fontSize, 12, 800) });
-                event.currentTarget.value = String(selectedText.fontSize);
-              }}
-            />
-            <span class="toolbar-separator"></span>
-            <button
-              type="button"
-              class="ui-btn ui-btn-sm ui-btn-icon ui-btn-ghost {selectedText.bold ? 'ui-btn-active' : ''}"
-              title="加粗"
-              aria-label="加粗"
-              aria-pressed={selectedText.bold}
-              onclick={() => update({ bold: !selectedText.bold })}
-            >
-              <Bold class="h-3.5 w-3.5" />
-            </button>
-            <ColorPicker kind="fill" label="文字颜色" value={selectedText.fill} onchange={(fill) => update({ fill })} />
-            <ColorPicker
-              kind="stroke"
-              label="描边"
-              allowNone
-              value={selectedText.stroke}
-              onchange={(stroke) => update({ stroke })}
-            >
-              <label class="flex items-center gap-2 text-[11px] text-fg-muted">
-                粗细
-                <input
-                  type="range"
-                  min="0.02"
-                  max="0.25"
-                  step="0.01"
-                  value={selectedText.strokeWidth}
-                  disabled={!selectedText.stroke}
-                  class="min-w-0 flex-1"
-                  oninput={(event) => update({ strokeWidth: Number(event.currentTarget.value) })}
-                />
-              </label>
-            </ColorPicker>
-            <ColorPicker
-              kind="background"
-              label="背景色"
-              allowNone
-              value={selectedText.background}
-              onchange={(background) => update({ background })}
-            />
-            <button
-              type="button"
-              class="ui-btn ui-btn-sm ui-btn-icon ui-btn-ghost {selectedText.shadow ? 'ui-btn-active' : ''}"
-              title="阴影"
-              aria-label="阴影"
-              aria-pressed={selectedText.shadow}
-              onclick={() => update({ shadow: !selectedText.shadow })}
-            >
-              <span class="shadow-glyph text-[13px] font-bold leading-none">A</span>
-            </button>
-            {@const alignment = ALIGNMENTS.find((a) => a.value === selectedText.align)}
-            {@const multiline = selectedText.content.includes("\n")}
-            <button
-              type="button"
-              class="ui-btn ui-btn-sm ui-btn-icon ui-btn-ghost"
-              title={multiline ? `对齐：${alignment.label}` : "多行文字可设置对齐"}
-              aria-label="对齐方式"
-              disabled={!multiline}
-              onclick={() =>
-                update({ align: ALIGNMENTS[(ALIGNMENTS.indexOf(alignment) + 1) % ALIGNMENTS.length].value })}
-            >
-              <alignment.icon class="h-3.5 w-3.5" />
-            </button>
-          {:else if selectedSticker}
-            <button
-              type="button"
-              class="ui-btn ui-btn-sm {selectedSticker.flip ? 'ui-btn-active' : ''}"
-              aria-pressed={selectedSticker.flip}
-              onclick={() => update({ flip: !selectedSticker.flip })}
-            >
-              <FlipHorizontal2 class="h-3.5 w-3.5" />
-              水平翻转
-            </button>
           {:else if pictureSelected}
             <button
               type="button"
@@ -1165,91 +1030,31 @@
               {/if}
 
               {#if selected && selectedBox && editingId === null}
-                <div
-                  class="pointer-events-none absolute border-[1.5px] border-accent"
-                  style:left="{(selected.x - area.x) * unit}px"
-                  style:top="{(selected.y - area.y) * unit}px"
-                  style:width="{selectedBox.width * unit}px"
-                  style:height="{selectedBox.height * unit}px"
-                  style:transform="translate(-50%, -50%) rotate({selected.rotation}deg)"
-                >
-                  <button
-                    type="button"
-                    class="handle -left-2.5 -top-2.5 hover:text-danger-fg"
-                    title="删除"
-                    aria-label="删除"
-                    onpointerdown={(event) => event.stopPropagation()}
-                    onclick={() => remove(selected.id)}
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    class="handle -right-2.5 -top-2.5 cursor-grab"
-                    title="旋转，按住 Shift 以 15° 为步长"
-                    aria-label="旋转"
-                    onpointerdown={(event) => beginDrag(event, "rotate", selected)}
-                  >
-                    <RotateCw class="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    class="handle -bottom-2.5 -left-2.5 cursor-nesw-resize"
-                    title="缩放"
-                    aria-label="缩放"
-                    onpointerdown={(event) => beginDrag(event, "scale", selected)}
-                  >
-                    <MoveDiagonal2 class="h-3 w-3 rotate-90" />
-                  </button>
-                  <button
-                    type="button"
-                    class="handle -bottom-2.5 -right-2.5 cursor-nwse-resize"
-                    title="缩放"
-                    aria-label="缩放"
-                    onpointerdown={(event) => beginDrag(event, "scale", selected)}
-                  >
-                    <MoveDiagonal2 class="h-3 w-3" />
-                  </button>
-                </div>
+                <SelectionBox
+                  left={(selected.x - area.x) * unit}
+                  top={(selected.y - area.y) * unit}
+                  width={selectedBox.width * unit}
+                  height={selectedBox.height * unit}
+                  rotation={selected.rotation}
+                  onDelete={() => remove(selected.id)}
+                  onRotate={(event) => beginDrag(event, "rotate", selected)}
+                  onScale={(event) => beginDrag(event, "scale", selected)}
+                />
               {/if}
 
               {#if editing}
-                {@const layout = layoutText(editing, measure)}
-                <!-- Typing and selecting stay inside the field. -->
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="absolute"
-                  style:left="{(editing.x - area.x) * unit}px"
-                  style:top="{(editing.y - area.y) * unit}px"
-                  style:transform="translate(-50%, -50%) rotate({editing.rotation}deg)"
-                  onpointerdown={(event) => event.stopPropagation()}
-                  ondblclick={(event) => event.stopPropagation()}
-                >
-                  <div
+                {#key editing.id}
+                  <TextEditField
                     bind:this={editField}
-                    contenteditable="plaintext-only"
-                    role="textbox"
-                    tabindex="0"
-                    aria-multiline="true"
-                    aria-label="文字内容"
-                    spellcheck="false"
-                    class="edit-field"
-                    style="-webkit-text-stroke: {editing.stroke
-                      ? `${editing.strokeWidth * editing.fontSize * 2 * unit}px ${editing.stroke}`
-                      : '0'}"
-                    style:font-family={fontFamily(editing.font)}
-                    style:font-weight={editing.bold ? "bold" : "normal"}
-                    style:font-size="{editing.fontSize * unit}px"
-                    style:line-height={LINE_HEIGHT}
-                    style:color={editing.fill}
-                    style:text-align={editing.align}
-                    style:padding="{layout.padY * unit}px {layout.padX * unit}px"
-                    style:background={editing.background ?? "transparent"}
-                    style:border-radius="{editing.fontSize * 0.18 * unit}px"
-                    onkeydown={handleEditKeydown}
-                    onblur={finishEditing}
-                  ></div>
-                </div>
+                    text={editing}
+                    {unit}
+                    left={(editing.x - area.x) * unit}
+                    top={(editing.y - area.y) * unit}
+                    selectAll={editSelectAll}
+                    onInput={(content) => (editContent = content)}
+                    onDone={handleEditDone}
+                  />
+                {/key}
               {/if}
             </div>
           </div>
@@ -1371,37 +1176,6 @@
     height: 16px;
     width: 1px;
     background: rgb(var(--c-line-strong));
-  }
-
-  .shadow-glyph {
-    text-shadow: 1.5px 1.5px 1px rgb(var(--c-fg-faint));
-  }
-
-
-  .handle {
-    pointer-events: auto;
-    position: absolute;
-    display: flex;
-    height: 20px;
-    width: 20px;
-    align-items: center;
-    justify-content: center;
-    border-radius: 9999px;
-    border: 1px solid rgb(var(--c-line-strong));
-    background: white;
-    color: #3a4252;
-    box-shadow: 0 1px 4px rgb(0 0 0 / 30%);
-  }
-
-  .edit-field {
-    min-width: 0.6em;
-    white-space: pre;
-    outline: 1.5px dashed rgb(var(--c-accent));
-    outline-offset: 2px;
-    paint-order: stroke fill;
-    cursor: text;
-    user-select: text;
-    -webkit-user-select: text;
   }
 
   input[type="range"] {

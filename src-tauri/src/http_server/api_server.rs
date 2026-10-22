@@ -8,6 +8,7 @@ use crate::{
     config::{Config, LlmConfig},
     constants::API_PORT,
     database::{
+        audio::AudioRow,
         message::MessageRow,
         record::RecordRow,
         recorder::RecorderRow,
@@ -15,24 +16,30 @@ use crate::{
         task::TaskRow,
         video::VideoRow,
     },
+    feedback::{submit_feedback, FeedbackReceipt},
     handlers::{
         account::{
             add_account, get_account_count, get_accounts, get_qr, get_qr_status, remove_account,
+        },
+        audio::{
+            delete_audio_file, get_audio_files, get_audio_peaks, get_audio_usage,
+            import_audio_file, rename_audio_file,
         },
         config::{
             get_config, get_llm_config, get_mcp_server_status, get_static_port, list_llm_models,
             update_auto_generate, update_clip_name_format, update_danmu_ass_options,
             update_llm_config, update_mcp_server, update_notify, update_openai_api_endpoint,
-            update_openai_api_key, update_status_check_interval, update_subtitle_generator_type,
-            update_subtitle_setting, update_webhook_url, update_whisper_language,
-            update_whisper_model, update_whisper_prompt,
+            update_openai_api_key, update_powerlive_hotwords, update_powerlive_sentence_max_length,
+            update_status_check_interval, update_subtitle_generator_type, update_subtitle_setting,
+            update_webhook_url, update_whisper_language, update_whisper_model,
+            update_whisper_prompt,
         },
         message::{delete_message, get_messages, read_message},
         project::{
             create_project, delete_project, export_project, generate_materials, get_material_danmu,
-            get_material_peaks, get_material_usage, get_project, get_projects,
-            update_project_danmu, update_project_info, update_project_timeline, ExportStarted,
-            GeneratedMaterials, ProjectBrief, ProjectView,
+            get_material_peaks, get_material_usage, get_project, get_project_frame_rate,
+            get_projects, update_project_danmu, update_project_info, update_project_timeline,
+            ExportStarted, GeneratedMaterials, OverlayImage, ProjectBrief, ProjectView,
         },
         recorder::{
             add_recorder, delete_archive, delete_archives, export_danmu, fetch_hls,
@@ -55,7 +62,10 @@ use crate::{
             create_upload, delete_upload, get_upload, get_uploads, post_upload, request_upload,
             update_upload, update_upload_cover, update_upload_danmu, UploadView,
         },
-        utils::{console_log, get_disk_info, list_folder, sanitize_filename_advanced, DiskInfo},
+        utils::{
+            console_log, decode_data_url, get_disk_info, list_folder, sanitize_filename_advanced,
+            DiskInfo,
+        },
         video::{
             batch_import_external_videos, cancel, clip_range, clip_video, delete_video,
             encode_video_subtitle, generate_audio_sample, generate_video_subtitle,
@@ -450,6 +460,34 @@ async fn handler_update_webhook_url(
 #[serde(rename_all = "camelCase")]
 struct UpdateSubtitleGeneratorTypeRequest {
     subtitle_generator_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePowerLiveHotwordsRequest {
+    hotwords: Vec<String>,
+}
+
+async fn handler_update_powerlive_hotwords(
+    state: axum::extract::State<State>,
+    Json(param): Json<UpdatePowerLiveHotwordsRequest>,
+) -> Result<Json<ApiResponse<Vec<String>>>, ApiError> {
+    let hotwords = update_powerlive_hotwords(state.0, param.hotwords).await?;
+    Ok(Json(ApiResponse::success(hotwords)))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePowerLiveSentenceMaxLengthRequest {
+    sentence_max_length: u32,
+}
+
+async fn handler_update_powerlive_sentence_max_length(
+    state: axum::extract::State<State>,
+    Json(param): Json<UpdatePowerLiveSentenceMaxLengthRequest>,
+) -> Result<Json<ApiResponse<u32>>, ApiError> {
+    let length = update_powerlive_sentence_max_length(state.0, param.sentence_max_length).await?;
+    Ok(Json(ApiResponse::success(length)))
 }
 
 async fn handler_update_subtitle_generator_type(
@@ -1121,6 +1159,8 @@ struct ExportProjectRequest {
     #[serde(default)]
     subtitle_ass: Option<String>,
     #[serde(default)]
+    overlays: Option<Vec<OverlayImage>>,
+    #[serde(default)]
     target: Option<String>,
     #[serde(default)]
     base: Option<Timeline>,
@@ -1136,6 +1176,7 @@ async fn handler_export_project(
         param.id,
         param.timeline,
         param.subtitle_ass,
+        param.overlays,
         param.target,
         param.base,
     )
@@ -1281,6 +1322,8 @@ struct PostUploadRequest {
     id: i64,
     #[serde(default)]
     subtitle_ass: Option<String>,
+    #[serde(default)]
+    overlays: Option<Vec<OverlayImage>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1302,7 +1345,14 @@ async fn handler_post_upload(
     state: axum::extract::State<State>,
     Json(param): Json<PostUploadRequest>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
-    post_upload(state.0, param.event_id, param.id, param.subtitle_ass).await?;
+    post_upload(
+        state.0,
+        param.event_id,
+        param.id,
+        param.subtitle_ass,
+        param.overlays,
+    )
+    .await?;
     Ok(Json(ApiResponse::success(())))
 }
 
@@ -1321,6 +1371,86 @@ async fn handler_get_material_peaks(
 ) -> Result<Json<ApiResponse<Peaks>>, ApiError> {
     Ok(Json(ApiResponse::success(
         get_material_peaks(state.0, param.id).await?,
+    )))
+}
+
+async fn handler_get_audio_files(
+    state: axum::extract::State<State>,
+) -> Result<Json<ApiResponse<Vec<AudioRow>>>, ApiError> {
+    Ok(Json(ApiResponse::success(get_audio_files(state.0).await?)))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportAudioFileRequest {
+    file_path: String,
+    name: Option<String>,
+}
+
+async fn handler_import_audio_file(
+    state: axum::extract::State<State>,
+    Json(param): Json<ImportAudioFileRequest>,
+) -> Result<Json<ApiResponse<AudioRow>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        import_audio_file(state.0, param.file_path, param.name).await?,
+    )))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameAudioFileRequest {
+    id: i64,
+    name: String,
+}
+
+async fn handler_rename_audio_file(
+    state: axum::extract::State<State>,
+    Json(param): Json<RenameAudioFileRequest>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    rename_audio_file(state.0, param.id, param.name).await?;
+    Ok(Json(ApiResponse::success(())))
+}
+
+async fn handler_delete_audio_file(
+    state: axum::extract::State<State>,
+    Json(param): Json<IdRequest>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    delete_audio_file(state.0, param.id).await?;
+    Ok(Json(ApiResponse::success(())))
+}
+
+async fn handler_get_audio_usage(
+    state: axum::extract::State<State>,
+    Json(param): Json<IdRequest>,
+) -> Result<Json<ApiResponse<Vec<ProjectBrief>>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        get_audio_usage(state.0, param.id).await?,
+    )))
+}
+
+async fn handler_get_audio_peaks(
+    state: axum::extract::State<State>,
+    Json(param): Json<IdRequest>,
+) -> Result<Json<ApiResponse<Peaks>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        get_audio_peaks(state.0, param.id).await?,
+    )))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFrameRateRequest {
+    material_ids: Vec<i64>,
+    #[serde(default)]
+    danmu: bool,
+}
+
+async fn handler_get_project_frame_rate(
+    state: axum::extract::State<State>,
+    Json(param): Json<ProjectFrameRateRequest>,
+) -> Result<Json<ApiResponse<f64>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        get_project_frame_rate(state.0, param.material_ids, param.danmu).await?,
     )))
 }
 
@@ -1364,39 +1494,32 @@ async fn handler_image_base64(
 
     // 检查是否是base64数据URL
     if cover.starts_with("data:image/") {
-        if let Some(base64_start) = cover.find("base64,") {
-            let base64_data = &cover[base64_start + 7..]; // 跳过 "base64,"
+        if let Ok(image_data) = decode_data_url(&cover) {
+            // 确定MIME类型
+            let content_type = if cover.contains("data:image/png") {
+                "image/png"
+            } else if cover.contains("data:image/jpeg") || cover.contains("data:image/jpg") {
+                "image/jpeg"
+            } else if cover.contains("data:image/gif") {
+                "image/gif"
+            } else if cover.contains("data:image/webp") {
+                "image/webp"
+            } else {
+                "image/png" // 默认
+            };
 
-            // 解码base64数据
-            use base64::{engine::general_purpose, Engine as _};
-            if let Ok(image_data) = general_purpose::STANDARD.decode(base64_data) {
-                // 确定MIME类型
-                let content_type = if cover.contains("data:image/png") {
-                    "image/png"
-                } else if cover.contains("data:image/jpeg") || cover.contains("data:image/jpg") {
-                    "image/jpeg"
-                } else if cover.contains("data:image/gif") {
-                    "image/gif"
-                } else if cover.contains("data:image/webp") {
-                    "image/webp"
-                } else {
-                    "image/png" // 默认
-                };
+            let mut response = axum::response::Response::new(axum::body::Body::from(image_data));
+            let headers = response.headers_mut();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static(content_type),
+            );
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=3600"),
+            );
 
-                let mut response =
-                    axum::response::Response::new(axum::body::Body::from(image_data));
-                let headers = response.headers_mut();
-                headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::HeaderValue::from_static(content_type),
-                );
-                headers.insert(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("public, max-age=3600"),
-                );
-
-                return Ok(response);
-            }
+            return Ok(response);
         }
     }
 
@@ -1408,13 +1531,16 @@ async fn handler_image_base64(
 struct GenerateVideoSubtitleRequest {
     event_id: String,
     id: i64,
+    #[serde(default)]
+    powerlive: Option<crate::subtitle_generator::powerlive::PowerLiveOverrides>,
 }
 
 async fn handler_generate_video_subtitle(
     state: axum::extract::State<State>,
     Json(param): Json<GenerateVideoSubtitleRequest>,
 ) -> Result<Json<ApiResponse<String>>, ApiError> {
-    let result = generate_video_subtitle(state.0, param.event_id.clone(), param.id).await?;
+    let result =
+        generate_video_subtitle(state.0, param.event_id.clone(), param.id, param.powerlive).await?;
     Ok(Json(ApiResponse::success(result)))
 }
 
@@ -1916,6 +2042,21 @@ async fn handler_console_log(
     Ok(Json(ApiResponse::success(())))
 }
 
+#[derive(Debug, Deserialize)]
+struct SubmitFeedbackRequest {
+    message: String,
+    email: Option<String>,
+    screenshot: Option<String>,
+}
+
+async fn handler_submit_feedback(
+    state: axum::extract::State<State>,
+    Json(param): Json<SubmitFeedbackRequest>,
+) -> Result<Json<ApiResponse<FeedbackReceipt>>, ApiError> {
+    let receipt = submit_feedback(state.0, param.message, param.email, param.screenshot).await?;
+    Ok(Json(ApiResponse::success(receipt)))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HttpProxyRequest {
@@ -2071,8 +2212,9 @@ async fn handler_upload_file(
                 file_name = field.file_name().unwrap_or("unknown").to_string();
 
                 // 创建上传目录
-                let config = state.config.read().await;
-                let upload_dir = std::path::Path::new(&config.cache).join("uploads");
+                // Copy the path out so no config guard is held while streaming the upload.
+                let cache = state.config.read().await.cache.clone();
+                let upload_dir = std::path::Path::new(&cache).join("uploads");
                 if !upload_dir.exists() {
                     std::fs::create_dir_all(&upload_dir).map_err(|e| e.to_string())?;
                 }
@@ -2228,7 +2370,21 @@ pub async fn start_api_server(state: State) {
         (config.output.clone(), config.cache.clone())
     };
 
+    let (preview_output, preview_cache) = (output_path.clone(), cache_path.clone());
     let mut app = Router::new()
+        .route(
+            "/preview_audio",
+            get(
+                move |Query(query): Query<crate::preview_audio::ChunkQuery>| async move {
+                    crate::preview_audio::respond(
+                        std::path::Path::new(&preview_output),
+                        std::path::Path::new(&preview_cache),
+                        query,
+                    )
+                    .await
+                },
+            ),
+        )
         .nest_service("/output", ServeDir::new(output_path))
         .nest_service("/cache", ServeDir::new(cache_path))
         // Serve static files from dist directory
@@ -2241,6 +2397,8 @@ pub async fn start_api_server(state: State) {
     if !state.readonly {
         app = app
             .route("/api/update_mcp_server", post(handler_update_mcp_server))
+            // Sends the operator's logs, so viewers of a readonly server cannot.
+            .route("/api/submit_feedback", post(handler_submit_feedback))
             .route("/api/get_qr", post(handler_get_qr))
             .route("/api/get_qr_status", post(handler_get_qr_status))
             .route("/api/add_account", post(handler_add_account))
@@ -2311,6 +2469,14 @@ pub async fn start_api_server(state: State) {
                 post(handler_update_subtitle_generator_type),
             )
             .route(
+                "/api/update_powerlive_hotwords",
+                post(handler_update_powerlive_hotwords),
+            )
+            .route(
+                "/api/update_powerlive_sentence_max_length",
+                post(handler_update_powerlive_sentence_max_length),
+            )
+            .route(
                 "/api/update_openai_api_endpoint",
                 post(handler_update_openai_api_endpoint),
             )
@@ -2376,6 +2542,9 @@ pub async fn start_api_server(state: State) {
             )
             .route("/api/delete_upload", post(handler_delete_upload))
             .route("/api/add_cover_sticker", post(handler_add_cover_sticker))
+            .route("/api/import_audio_file", post(handler_import_audio_file))
+            .route("/api/rename_audio_file", post(handler_rename_audio_file))
+            .route("/api/delete_audio_file", post(handler_delete_audio_file))
             .route(
                 "/api/delete_cover_sticker",
                 post(handler_delete_cover_sticker),
@@ -2454,6 +2623,13 @@ pub async fn start_api_server(state: State) {
         .route("/api/get_cover_stickers", post(handler_get_cover_stickers))
         .route("/api/get_material_usage", post(handler_get_material_usage))
         .route("/api/get_material_peaks", post(handler_get_material_peaks))
+        .route("/api/get_audio_files", post(handler_get_audio_files))
+        .route("/api/get_audio_usage", post(handler_get_audio_usage))
+        .route("/api/get_audio_peaks", post(handler_get_audio_peaks))
+        .route(
+            "/api/get_project_frame_rate",
+            post(handler_get_project_frame_rate),
+        )
         .route("/api/get_material_danmu", post(handler_get_material_danmu))
         .route("/api/get_video_typelist", post(handler_get_video_typelist))
         .route("/api/get_video_subtitle", post(handler_get_video_subtitle))
