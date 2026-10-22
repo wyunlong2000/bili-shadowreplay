@@ -105,6 +105,7 @@ pub struct RecorderManager {
     event_tx: RecorderEventSender,
     is_migrating: Arc<AtomicBool>,
     webhook_poster: WebhookPoster,
+    automation_service: Arc<tokio::sync::RwLock<Option<Arc<crate::automation::AutomationService>>>>,
 }
 
 #[derive(Error, Debug)]
@@ -200,6 +201,7 @@ impl RecorderManager {
             event_tx,
             is_migrating: Arc::new(AtomicBool::new(false)),
             webhook_poster,
+            automation_service: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         // Start event listener
@@ -218,6 +220,12 @@ impl RecorderManager {
 
     pub fn get_event_sender(&self) -> RecorderEventSender {
         self.event_tx.clone()
+    }
+
+    /// 注入自动化切片服务引用
+    pub async fn set_automation_service(&self, service: Arc<crate::automation::AutomationService>) {
+        let mut lock = self.automation_service.write().await;
+        *lock = Some(service);
     }
 
     async fn handle_events(&self, mut rx: RecorderEventReceiver) {
@@ -327,6 +335,7 @@ impl RecorderManager {
                     );
                     let _ = self.webhook_poster.post_event(&event).await;
                     self.handle_live_end(platform, &room_id, &recorder).await;
+                    self.handle_automation_live_end(platform, &room_id, &recorder).await;
                     if self.config.read().await.live_end_notify {
                         #[cfg(feature = "gui")]
                         self.app_handle
@@ -385,6 +394,9 @@ impl RecorderManager {
                 }
                 RecorderEvent::RecordEnd { recorder } => {
                     self.db.notify_change(DataChange::Recorders);
+                    if let Some(service) = self.automation_service.read().await.as_ref() {
+                        service.notifier().notify_waiters();
+                    }
                     log::info!("Record end: {recorder:?}");
                     let live_id = recorder.live_id.clone();
                     if live_id.is_empty() {
@@ -550,6 +562,35 @@ impl RecorderManager {
                 .db
                 .update_task(&task.id, "failed", &format!("加入队列失败: {error}"), None)
                 .await;
+        }
+    }
+
+    /// 旁路触发自动化切片场次入队（与旧版 auto_generate 隔离共存）
+    async fn handle_automation_live_end(
+        &self,
+        platform: PlatformType,
+        room_id: &str,
+        recorder: &RecorderInfo,
+    ) {
+        let auto_service = self.automation_service.read().await.clone();
+        let Some(auto_service) = auto_service else {
+            return;
+        };
+
+        let parent_id = match live_end_parent_id(&self.db, platform, room_id, recorder).await {
+            Ok(Some(parent_id)) => parent_id,
+            Ok(None) => return,
+            Err(e) => {
+                log::warn!("自动化切片解析 parent_id 失败: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = auto_service
+            .enqueue_ended_live(platform.as_str(), room_id, &parent_id, &recorder.live_id)
+            .await
+        {
+            log::error!("自动化切片下播入队失败: {e}");
         }
     }
 

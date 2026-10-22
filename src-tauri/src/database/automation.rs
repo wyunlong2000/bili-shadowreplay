@@ -578,4 +578,68 @@ impl Database {
 
         Ok(row)
     }
+
+    /// 应用启动时恢复异常中断的自动化任务（从 processing 标记为 interrupted）。
+    pub async fn recover_interrupted_runs(&self) -> Result<u64, DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let res = sqlx::query(
+            r#"
+            UPDATE automation_runs
+            SET status = 'interrupted', error_message = '任务因应用退出而中断', updated_at = $1
+            WHERE status = 'processing'
+            "#,
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
+
+    /// 获取下一个待执行或等待封口的自动化场次任务。
+    pub async fn get_next_pending_run(&self) -> Result<Option<AutomationRunRow>, DatabaseError> {
+        let row = sqlx::query_as::<Sqlite, AutomationRunRow>(
+            r#"
+            SELECT * FROM automation_runs
+            WHERE status IN ('pending', 'waiting')
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// 更新场次运行记录的来源清单与媒体指纹，并进入下一步处理阶段。
+    pub async fn update_run_manifest(
+        &self,
+        run_id: &str,
+        manifest_json: &str,
+        input_hash: &str,
+        total_duration_ms: i64,
+    ) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            UPDATE automation_runs
+            SET source_manifest_json = $1, input_hash = $2,
+                range_start_ms = 0, range_end_ms = $3,
+                status = 'processing', stage = 'transcribing',
+                updated_at = $4
+            WHERE id = $5
+            "#,
+        )
+        .bind(manifest_json)
+        .bind(input_hash)
+        .bind(total_duration_ms)
+        .bind(&now)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
 }
+

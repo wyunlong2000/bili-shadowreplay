@@ -1041,6 +1041,24 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
         config.read().await.output.clone().into(),
     ));
 
+    let cache_dir: std::path::PathBuf = config.read().await.cache.clone().into();
+    let output_dir: std::path::PathBuf = config.read().await.output.clone().into();
+    let automation_notify = Arc::new(tokio::sync::Notify::new());
+    let automation_service = Arc::new(crate::automation::AutomationService::new(
+        db.clone(),
+        config.clone(),
+        task_manager.clone(),
+        events.clone(),
+        cache_dir,
+        output_dir,
+        automation_notify,
+    ));
+    if let Err(e) = automation_service.recover_interrupted_runs().await {
+        log::warn!("恢复中断的自动化任务失败: {e}");
+    }
+    automation_service.start();
+    recorder_manager.set_automation_service(automation_service.clone()).await;
+
     Ok(State {
         mcp_server: Arc::new(mcp::McpServer::default()),
         db,
@@ -1051,6 +1069,7 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
         events,
         resource_dir,
         readonly: args.readonly,
+        automation: automation_service,
     })
 }
 
@@ -1178,6 +1197,22 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
         output_path.clone().into(),
     ));
 
+    let automation_notify = Arc::new(tokio::sync::Notify::new());
+    let automation_service = Arc::new(crate::automation::AutomationService::new(
+        db.clone(),
+        config.clone(),
+        task_manager.clone(),
+        events.clone(),
+        cache_path.into(),
+        output_path.into(),
+        automation_notify,
+    ));
+    if let Err(e) = automation_service.recover_interrupted_runs().await {
+        log::warn!("恢复中断的自动化任务失败: {e}");
+    }
+    automation_service.start();
+    recorder_manager.set_automation_service(automation_service.clone()).await;
+
     Ok(Some(State {
         mcp_server: Arc::new(mcp::McpServer::default()),
         events,
@@ -1189,6 +1224,7 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
         app_handle: app.handle().clone(),
         resource_dir,
         webhook_poster,
+        automation: automation_service,
     }))
 }
 

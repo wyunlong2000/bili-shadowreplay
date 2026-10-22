@@ -46,6 +46,7 @@ pub enum DataChange {
     Recorders,
     Records,
     Audio,
+    Automation,
     Resync,
 }
 
@@ -59,6 +60,7 @@ impl DataChange {
             Self::Recorders => "recorders-changed",
             Self::Records => "records-changed",
             Self::Audio => "audio-changed",
+            Self::Automation => "automation-changed",
             Self::Resync => "state-resync",
         }
     }

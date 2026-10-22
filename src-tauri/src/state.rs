@@ -28,4 +28,5 @@ pub struct State {
     pub events: EventBus,
     #[cfg(feature = "headless")]
     pub readonly: bool,
+    pub automation: Arc<crate::automation::AutomationService>,
 }

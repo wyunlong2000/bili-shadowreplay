@@ -2174,6 +2174,15 @@ mod queued_subtitle_tests {
             dir.to_path_buf(),
             webhook_poster.clone(),
         ));
+        let automation = Arc::new(crate::automation::AutomationService::new(
+            db.clone(),
+            config.clone(),
+            task_manager.clone(),
+            events.clone(),
+            dir.to_path_buf(),
+            dir.to_path_buf(),
+            Arc::new(tokio::sync::Notify::new()),
+        ));
         State {
             mcp_server: Arc::new(McpServer::default()),
             db,
@@ -2184,6 +2193,7 @@ mod queued_subtitle_tests {
             resource_dir: dir.to_path_buf(),
             events,
             readonly: false,
+            automation,
         }
     }
 
