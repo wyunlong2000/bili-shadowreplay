@@ -366,6 +366,46 @@ impl AutomationService {
                     .await;
 
                 self.db.notify_change(DataChange::Automation);
+
+                let config = self.config.read().await.clone();
+                let policy: AutoClippingPolicy =
+                    serde_json::from_str(&pending_run.config_snapshot_json).unwrap_or_default();
+
+                let db = self.db.clone();
+                let run_id = pending_run.id.clone();
+                let platform = pending_run.platform.clone();
+                let room_id = pending_run.room_id.clone();
+                let parent_id = pending_run.parent_id.clone();
+                let live_id = pending_run.live_id.clone();
+                let manifest_items = manifest.items.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = super::analysis::run_analysis_pipeline(
+                        &db,
+                        &config,
+                        &run_id,
+                        &platform,
+                        &room_id,
+                        &parent_id,
+                        &live_id,
+                        &manifest_items,
+                        &policy,
+                    )
+                    .await
+                    {
+                        log::error!("自动化切片分析流水线执行失败: {e}");
+                        let _ = db
+                            .update_automation_run_status(
+                                &run_id,
+                                "failed",
+                                "failed",
+                                Some("ANALYSIS_FAILED"),
+                                Some(&e),
+                            )
+                            .await;
+                        db.notify_change(DataChange::Automation);
+                    }
+                });
             }
             Ok(None) => {
                 log::warn!("未找到场次录播分段: run_id={}", pending_run.id);
