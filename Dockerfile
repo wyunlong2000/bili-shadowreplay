@@ -96,6 +96,9 @@ COPY --from=frontend-builder /app/dist ./dist
 # Copy built Rust binary
 COPY --from=rust-builder /app/src-tauri/target/release/bili-shadowreplay .
 
+# Copy bundled resources (Silero VAD model)
+COPY src-tauri/silero_vad.onnx .
+
 # Expose port
 EXPOSE 3000
 
