@@ -43,4 +43,23 @@ void whisper_rs_params_set_initial_prompt(struct whisper_full_params * params, c
     params->initial_prompt = value;
 }
 
+
+int whisper_rs_full_with_state(
+    struct whisper_context * ctx,
+    struct whisper_state * state,
+    struct whisper_full_params * params,
+    const float * samples,
+    int n_samples
+) {
+    return whisper_full_with_state(ctx, state, *params, samples, n_samples);
+}
+
+int whisper_rs_full(
+    struct whisper_context * ctx,
+    struct whisper_full_params * params,
+    const float * samples,
+    int n_samples
+) {
+    return whisper_full(ctx, *params, samples, n_samples);
+}
 }

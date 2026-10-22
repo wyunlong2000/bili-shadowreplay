@@ -87,14 +87,14 @@ extern "C" {
         strategy: whisper_sampling_strategy,
     ) -> *mut whisper_full_params;
 
-    fn whisper_full(
+    fn whisper_rs_full(
         ctx: *mut std::ffi::c_void,
         params: *mut whisper_full_params,
         samples: *const f32,
         n_samples: c_int,
     ) -> c_int;
 
-    fn whisper_full_with_state(
+    fn whisper_rs_full_with_state(
         ctx: *mut std::ffi::c_void,
         state: *mut std::ffi::c_void,
         params: *mut whisper_full_params,
@@ -361,7 +361,7 @@ impl WhisperState {
         samples: &[f32],
     ) -> Result<i32, String> {
         let ret = unsafe {
-            whisper_full_with_state(
+            whisper_rs_full_with_state(
                 ctx.ctx,
                 self.state,
                 params.params,

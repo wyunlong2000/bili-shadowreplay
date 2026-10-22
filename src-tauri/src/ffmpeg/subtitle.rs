@@ -165,15 +165,20 @@ pub async fn generate_video_subtitle(
             if whisper_model.is_empty() {
                 return Err("Whisper model not configured".to_string());
             }
-            let vad_model = resource_dir.join("silero_vad.onnx");
-            if !vad_model.is_file() {
-                return Err(format!(
-                    "Bundled Silero VAD model not found: {}",
-                    vad_model.display()
-                ));
-            }
+
+            let raw_path = Path::new(whisper_model);
+            let model_path = if raw_path.is_file() {
+                raw_path.to_path_buf()
+            } else if resource_dir.join(whisper_model).is_file() {
+                resource_dir.join(whisper_model)
+            } else if Path::new("data").join(whisper_model).is_file() {
+                Path::new("data").join(whisper_model)
+            } else {
+                raw_path.to_path_buf()
+            };
+
             let generator = crate::subtitle_generator::whisper_cpp::new(
-                Path::new(whisper_model),
+                &model_path,
                 whisper_prompt,
             )
             .await
@@ -185,49 +190,35 @@ pub async fn generate_video_subtitle(
             let full_wav = super::audio::extract_full_audio(file).await?;
             let full_wav_guard = TempArtifact::new(full_wav.clone());
             let (f32_samples, sample_rate) = read_wav_f32(&full_wav)?;
-            // The samples are in memory and chunks are cut from `file`, so the
-            // WAV is no longer needed. The guard also removes it if decoding fails.
             drop(full_wav_guard);
 
             if let Some(reporter) = reporter {
-                reporter.update("检测语音片段中").await;
+                reporter.update("音频能量与分段分析中").await;
             }
-            let mut speech_segments =
-                crate::audio_utils::silero_vad(&f32_samples, sample_rate, &vad_model)?;
             let audio_duration = f32_samples.len() as f64 / f64::from(sample_rate);
-            if speech_segments.is_empty() && audio_duration > 0.0 {
-                log::warn!("Silero VAD detected no speech; falling back to the full audio");
-                speech_segments.push(crate::audio_utils::SpeechSegment {
-                    start: 0.0,
-                    end: audio_duration,
-                });
-            }
             let (energies, frame_sec) = crate::audio_utils::rms_energies(&f32_samples, sample_rate);
-            // Chunks are re-extracted from `file` below, so free the decoded
-            // recording before the long transcription loop.
             drop(f32_samples);
-            log::info!(
-                "Silero VAD detected {} speech segments from {:.1}s audio",
-                speech_segments.len(),
-                audio_duration
-            );
 
-            // Cut & Merge: normalize to ≤30s chunks
+            let initial_segments = vec![crate::audio_utils::SpeechSegment {
+                start: 0.0,
+                end: audio_duration,
+            }];
+
+            // 基于 RMS 能量在静音/低能量停顿点将长音频切分成 ≤30s 的 Whisper 最佳转写块
             let max_chunk = 30.0;
             let chunks = crate::audio_utils::cut_and_merge(
-                &speech_segments,
+                &initial_segments,
                 &energies,
                 frame_sec,
                 max_chunk, // cut_max: split segments >30s
                 10.0,      // merge_max: merge adjacent segments ≤10s
             );
             log::info!(
-                "Cut & Merge: {} speech segments → {} chunks (≤{}s each)",
-                speech_segments.len(),
+                "音频分段完成: 总时长 {:.1}s，基于能量断点切分为 {} 个转写块（每块 ≤{}s）",
+                audio_duration,
                 chunks.len(),
                 max_chunk
             );
-
             // Process each chunk
             let mut results = Vec::new();
             let mut rolling_context = String::new();

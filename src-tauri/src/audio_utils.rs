@@ -22,34 +22,31 @@ pub fn silero_vad(
         ));
     }
 
-    let config = VadModelConfig {
-        silero_vad: SileroVadModelConfig {
-            model: Some(model_path.to_string_lossy().into_owned()),
-            threshold: 0.5,
-            min_silence_duration: 0.25,
-            min_speech_duration: 0.25,
-            window_size: 512,
-            max_speech_duration: 28.0,
-        },
-        sample_rate: sample_rate as i32,
-        num_threads: 1,
-        provider: Some("cpu".to_string()),
-        debug: false,
-        ..Default::default()
-    };
+    let mut config = VadModelConfig::default();
+    config.silero_vad.model = Some(model_path.to_string_lossy().into_owned());
+    config.silero_vad.threshold = 0.5;
+    config.silero_vad.min_silence_duration = 0.25;
+    config.silero_vad.min_speech_duration = 0.25;
+    config.silero_vad.window_size = 512;
+    config.silero_vad.max_speech_duration = 28.0;
+    config.sample_rate = sample_rate as i32;
+    config.num_threads = 1;
+    config.debug = false;
+
     let vad = VoiceActivityDetector::create(&config, 30.0)
         .ok_or_else(|| "Failed to create sherpa-onnx Silero VAD".to_string())?;
-
+    
     let mut segments = Vec::new();
     let mut drain_segments = || {
-        while let Some(segment) = vad.front() {
-            let start = segment.start().max(0) as f64 / f64::from(sample_rate);
-            let end = start + segment.n().max(0) as f64 / f64::from(sample_rate);
-            drop(segment);
-            vad.pop();
-            if end > start {
-                segments.push(SpeechSegment { start, end });
+        while !vad.is_empty() {
+            if let Some(segment) = vad.front() {
+                let start = segment.start().max(0) as f64 / f64::from(sample_rate);
+                let end = start + segment.n().max(0) as f64 / f64::from(sample_rate);
+                if end > start {
+                    segments.push(SpeechSegment { start, end });
+                }
             }
+            vad.pop();
         }
     };
 
