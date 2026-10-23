@@ -36,6 +36,7 @@
       account.avatar = avatar_url;
     }
     account_info = new_account_info;
+    window.dispatchEvent(new CustomEvent("accounts-changed"));
   }
 
   update_accounts();
@@ -371,8 +372,8 @@
                 <Textarea
                   bind:value={cookie_str}
                   rows={4}
-                  class="ui-input w-full resize-none rounded-[8px] border-line-strong bg-control text-fg dark:border-line-strong dark:bg-control dark:text-fg dark:placeholder-fg-faint"
-                  unWrappedClass="px-2.5 py-2 text-[12px] focus:border-accent focus:ring-0 dark:focus:border-accent dark:focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50"
+                  class="ui-input w-full resize-none rounded-[8px] border-line-strong bg-control text-fg "
+                  unWrappedClass="px-2.5 py-2 text-[12px] focus:border-accent focus:ring-0  disabled:cursor-not-allowed disabled:opacity-50"
                   placeholder={`请粘贴 ${selectedPlatform} 账号的 Cookie`}
                 />
               </p>

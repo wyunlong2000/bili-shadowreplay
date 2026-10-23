@@ -10,7 +10,7 @@
   import Setting from "./page/Setting.svelte";
   import Account from "./page/Account.svelte";
   import About from "./page/About.svelte";
-  import { listen, log, onOpenUrl } from "./lib/invoker";
+  import { listen, log, onOpenUrl, invoke } from "./lib/invoker";
   import Clip from "./page/Clip.svelte";
   import Material from "./page/Material.svelte";
   import Upload from "./page/Upload.svelte";
@@ -25,8 +25,10 @@
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import { pages } from "./lib/pages";
   import { registerCommands } from "./lib/stores/commands";
-  import { openTaskCenter } from "./lib/stores/tasks";
+  import { openTaskCenter, activeTasks } from "./lib/stores/tasks";
   import { requestUpload, uploadRequest } from "./lib/uploads";
+  import { createStateRefresh, watchStateChanges } from "./lib/state-refresh";
+  import type { RecorderList } from "./lib/interface";
   import { ListChecks, PanelLeft } from "lucide-svelte";
   import { onMount, tick } from "svelte";
 
@@ -44,6 +46,35 @@
   }
 
   let settingPage: ReturnType<typeof Setting> | undefined = $state();
+
+  /** 侧边栏导航角标数量映射表。 */
+  let navCounts = $state<Record<string, number | null | undefined>>({});
+
+  /** 刷新侧边栏角标统计数据（直播间数、已连接账号数等）。 */
+  async function refreshNavCounts() {
+    try {
+      const [recorders, accountCount] = await Promise.all([
+        invoke<RecorderList>("get_recorder_list").catch(() => null),
+        invoke<number>("get_account_count").catch(() => null),
+      ]);
+      if (recorders) {
+        navCounts["直播间"] = recorders.count;
+      }
+      if (accountCount !== null && accountCount !== undefined) {
+        navCounts["账号"] = accountCount;
+      }
+    } catch {
+      // 忽略角标加载异常
+    }
+  }
+
+  $effect(() => {
+    if ($activeTasks.length > 0) {
+      navCounts["任务"] = $activeTasks.length;
+    } else {
+      delete navCounts["任务"];
+    }
+  });
 
   /** Shows the settings page, optionally scrolled to one of its options. */
   async function openSettings(target?: string) {
@@ -129,7 +160,30 @@
     const onNavSettings = (event: Event) =>
       void openSettings((event as CustomEvent<string | undefined>).detail);
     window.addEventListener("navigate-settings", onNavSettings);
-    return () => window.removeEventListener("navigate-settings", onNavSettings);
+
+    const onNavPage = (event: Event) => {
+      const page = (event as CustomEvent<string>).detail;
+      if (page) active = page;
+    };
+    window.addEventListener("navigate-page", onNavPage);
+
+    const refresh = createStateRefresh(refreshNavCounts);
+    const unwatch = watchStateChanges(
+      refresh,
+      ["recorders-changed"],
+      30_000,
+    );
+    const onAccountsChanged = () => {
+      void refresh.run();
+    };
+    window.addEventListener("accounts-changed", onAccountsChanged);
+
+    return () => {
+      window.removeEventListener("navigate-settings", onNavSettings);
+      window.removeEventListener("navigate-page", onNavPage);
+      window.removeEventListener("accounts-changed", onAccountsChanged);
+      unwatch();
+    };
   });
 
   // Posting from the material or project lists, or from a project editor
@@ -190,6 +244,7 @@
   <BSidebar
     bind:activeUrl={active}
     collapsed={sidebarCollapsed}
+    counts={navCounts}
     onActiveChange={(label) => {
       active = label;
     }}

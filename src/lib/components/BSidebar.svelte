@@ -1,13 +1,13 @@
 <script module lang="ts">
   export const SIDEBAR_WIDTH = 192;
-  /** Collapsed: an icon rail, centered on the icons' fixed position. */
+  /** 折叠状态下侧边栏固定宽度（图标居中排列）。 */
   export const SIDEBAR_RAIL_WIDTH = 52;
 </script>
 
 <script lang="ts">
   import { Command } from "lucide-svelte";
   import { PALETTE_SHORTCUT } from "../command-palette";
-  import { pages } from "../pages";
+  import { navGroups } from "../pages";
   import { openCommandPalette } from "../stores/commands";
   import { hasNewVersion } from "../stores/version";
   import {
@@ -18,9 +18,11 @@
   } from "../window-chrome";
   import SidebarItem from "./SidebarItem.svelte";
   import SidebarToggle from "./SidebarToggle.svelte";
+
   interface Props {
     activeUrl?: string;
     collapsed?: boolean;
+    counts?: Record<string, number | null | undefined>;
     onActiveChange?: (label: string) => void;
     onToggleCollapsed?: () => void;
   }
@@ -28,28 +30,33 @@
   let {
     activeUrl = $bindable("总览"),
     collapsed = false,
+    counts = {},
     onActiveChange,
     onToggleCollapsed,
   }: Props = $props();
 
-  // On macOS the toggle sits right after the traffic lights. The rail is too
-  // narrow for that, so while collapsed the window title bar shows it instead.
+  // macOS 下红绿灯避让间距
   let lightsInset = $derived(MAC_TRAFFIC_LIGHTS && !$windowState.fullscreen);
 
   /**
-   * @param {{ detail: String; }} route
+   * 切换当前激活页面。
+   * @param label 目标页面名称
    */
   function navigate(label: string) {
     activeUrl = label;
     onActiveChange?.(label);
   }
+
+  // 常规顶部导航分组与置底应用管理分组
+  let topGroups = $derived(navGroups.filter((g) => !g.isTail));
+  let tailGroup = $derived(navGroups.find((g) => g.isTail));
 </script>
 
 <div
   class="flex shrink-0 flex-col overflow-hidden bg-chrome transition-[width] duration-200"
   style:width="{collapsed ? SIDEBAR_RAIL_WIDTH : SIDEBAR_WIDTH}px"
 >
-  <!-- Title bar part of the sidebar; on macOS the traffic lights sit here. -->
+  <!-- 侧边栏标题栏区域，适配 macOS 红绿灯与窗口拖拽 -->
   <div
     class="flex h-10 shrink-0 items-center gap-2 overflow-hidden pr-3"
     style:padding-left="{lightsInset ? TRAFFIC_LIGHTS_INSET : 12}px"
@@ -65,34 +72,67 @@
       </span>
     {/if}
   </div>
-  <!-- The divider starts below the title row, so the traffic lights never sit on it. -->
-  <div class="flex min-h-0 flex-1 flex-col border-r border-line px-2 pb-3 pt-1">
-    <nav class="space-y-0.5">
-      {#each pages as page (page.label)}
-        <SidebarItem
-          label={page.label}
-          {activeUrl}
-          {collapsed}
-          onActiveChange={navigate}
-          dot={page.label === "关于" && $hasNewVersion}
-        >
-          {#snippet icon()}
-            <page.icon class="h-4 w-4 shrink-0" />
-          {/snippet}
-        </SidebarItem>
-      {/each}
-    </nav>
 
-    <!-- Like a sidebar item, so the rail keeps just its icon. -->
+  <!-- 分割线从标题行下方开始延伸 -->
+  <div class="flex min-h-0 flex-1 flex-col border-r border-line px-2 pb-3 pt-1">
+    <div class="flex flex-col gap-2.5 overflow-y-auto overflow-x-hidden custom-scrollbar-light">
+      {#each topGroups as group (group.title)}
+        <nav class="space-y-0.5">
+          {#if !collapsed}
+            <div class="select-none px-2.5 pb-1 pt-1 text-[11px] font-medium text-fg-muted">
+              {group.title}
+            </div>
+          {/if}
+          {#each group.pages as page (page.label)}
+            <SidebarItem
+              label={page.label}
+              {activeUrl}
+              {collapsed}
+              count={counts[page.label]}
+              onActiveChange={navigate}
+              dot={page.label === "关于" && $hasNewVersion}
+            >
+              {#snippet icon()}
+                <page.icon class="h-4 w-4 shrink-0" />
+              {/snippet}
+            </SidebarItem>
+          {/each}
+        </nav>
+      {/each}
+    </div>
+
+    <!-- 置底分组：应用管理 -->
+    {#if tailGroup}
+      <nav class="mt-auto border-t border-line pt-2 space-y-0.5">
+        {#each tailGroup.pages as page (page.label)}
+          <SidebarItem
+            label={page.label}
+            {activeUrl}
+            {collapsed}
+            count={counts[page.label]}
+            onActiveChange={navigate}
+            dot={page.label === "关于" && $hasNewVersion}
+          >
+            {#snippet icon()}
+              <page.icon class="h-4 w-4 shrink-0" />
+            {/snippet}
+          </SidebarItem>
+        {/each}
+      </nav>
+    {/if}
+
+    <!-- 命令面板入口，折叠时仅展示图标 -->
     <button
       type="button"
-      class="mt-auto flex h-8 w-full items-center gap-2.5 overflow-hidden whitespace-nowrap rounded-[8px] px-2.5 text-[13px] text-fg-muted transition-colors hover:bg-control-hover hover:text-fg"
+      class="mt-1 flex h-8 w-full items-center gap-2.5 overflow-hidden whitespace-nowrap rounded-[8px] px-2.5 text-[13px] text-fg-muted transition-colors hover:bg-control-hover hover:text-fg"
       title="命令面板（{PALETTE_SHORTCUT}）"
       onclick={openCommandPalette}
     >
       <Command class="h-4 w-4 shrink-0" />
-      <span>命令面板</span>
-      <kbd class="ml-auto font-sans text-[10px] text-fg-faint">{PALETTE_SHORTCUT}</kbd>
+      {#if !collapsed}
+        <span>命令面板</span>
+        <kbd class="ml-auto font-sans text-[10px] text-fg-faint">{PALETTE_SHORTCUT}</kbd>
+      {/if}
     </button>
   </div>
 </div>

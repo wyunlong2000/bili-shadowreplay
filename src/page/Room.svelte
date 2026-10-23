@@ -6,35 +6,27 @@
   import { invoke, open, onOpenUrl, get_static_url, get } from "../lib/invoker";
   import { message } from "@tauri-apps/plugin-dialog";
   import { fade, scale } from "svelte/transition";
-  import { Dropdown, DropdownItem } from "flowbite-svelte";
   import type { RecorderList, RecorderInfo } from "../lib/interface";
   import type { RecordItem } from "../lib/db";
   import {
     Ellipsis,
+    FileVideo,
+    Globe,
+    History,
     Play,
     Plus,
-    FileVideo,
     Search,
+    Sparkles,
     Trash2,
     X,
-    History,
-    PlayIcon,
-    Globe,
   } from "lucide-svelte";
-  import BilibiliIcon from "../lib/components/BilibiliIcon.svelte";
-  import DouyinIcon from "../lib/components/DouyinIcon.svelte";
-  import DouyuIcon from "../lib/components/DouyuIcon.svelte";
-  import KuaishouIcon from "../lib/components/KuaishouIcon.svelte";
-  import HuyaIcon from "../lib/components/HuyaIcon.svelte";
-  import TikTokIcon from "../lib/components/TikTokIcon.svelte";
-  import TwitchIcon from "../lib/components/TwitchIcon.svelte";
-  import YouTubeIcon from "../lib/components/YouTubeIcon.svelte";
   import PlatformIconTabs from "../lib/components/PlatformIconTabs.svelte";
-  import AutoRecordIcon from "../lib/components/AutoRecordIcon.svelte";
   import GenerateWholeClipModal from "../lib/components/GenerateWholeClipModal.svelte";
   import RoomAutomationDialog from "../lib/components/automation/RoomAutomationDialog.svelte";
-  import { onMount } from "svelte";
+  import PageTitlebar from "../lib/components/PageTitlebar.svelte";
+  import { getAutomationPolicy } from "../lib/automation";
   import { registerCommands } from "../lib/stores/commands";
+  import { onMount } from "svelte";
 
   interface Props {
     room_count?: number;
@@ -50,21 +42,51 @@
 
   let selectedAutomationRoom: RecorderInfo | null = $state(null);
   let showAutomationDialog = $state(false);
+  let openMenuRoomKey: string | null = $state(null);
+  let searchInput: HTMLInputElement | null = $state(null);
+  let autoPoliciesSeq = 0;
 
   let summary: RecorderList = $state({
     count: 0,
     recorders: [],
   });
 
+  /** 房间自动切片开启状态缓存表。 */
+  let roomAutoPolicies: Map<string, boolean> = $state(new Map());
+
+  // 平台筛选
+  const platformFilters = [
+    { id: "all", label: "全部平台" },
+    { id: "bilibili", label: "B 站" },
+    { id: "douyin", label: "抖音" },
+    { id: "huya", label: "虎牙" },
+    { id: "douyu", label: "斗鱼" },
+    { id: "kuaishou", label: "快手" },
+    { id: "tiktok", label: "TikTok" },
+    { id: "twitch", label: "Twitch" },
+    { id: "youtube", label: "YouTube" },
+  ];
+  let selectedPlatformFilter = $state("all");
   let searchQuery = $state("");
-  let filteredRecorders = $derived(summary.recorders.filter((room) => {
-    const query = searchQuery.toLowerCase();
-    return (
-      room.room_info.room_title.toLowerCase().includes(query) ||
-      room.user_info.user_name.toLowerCase().includes(query) ||
-      room.room_info.room_id.toString().includes(query)
-    );
-  }));
+
+  /** 根据平台筛选与搜索词过滤直播间列表。 */
+  let filteredRecorders = $derived(
+    summary.recorders.filter((room) => {
+      const matchesPlatform =
+        selectedPlatformFilter === "all" ||
+        room.room_info.platform === selectedPlatformFilter;
+      if (!matchesPlatform) return false;
+
+      const query = searchQuery.trim().toLowerCase();
+      if (!query) return true;
+
+      return (
+        room.room_info.room_title.toLowerCase().includes(query) ||
+        room.user_info.user_name.toLowerCase().includes(query) ||
+        room.room_info.room_id.toString().toLowerCase().includes(query)
+      );
+    }),
+  );
 
   /** 返回主播当前可展示的检测状态。 */
   function getDetectionStatus(room: RecorderInfo): DetectionStatus {
@@ -86,9 +108,9 @@
   function getDetectionLabel(status: DetectionStatus) {
     switch (status) {
       case "live":
-        return "直播进行中";
+        return "直播中";
       case "offline":
-        return "直播未开始";
+        return "未直播";
       case "unconfirmed":
         return "等待首次检测";
       default:
@@ -116,7 +138,7 @@
   }
 
   function default_avatar(platform: string) {
-    const avatarMap = {
+    const avatarMap: Record<string, string> = {
       bilibili: "/imgs/bilibili_avatar.png",
       douyin: "/imgs/douyin.png",
       douyu: "/imgs/douyu.svg",
@@ -130,7 +152,7 @@
   }
 
   function default_cover(platform: string) {
-    const coverMap = {
+    const coverMap: Record<string, string> = {
       bilibili: "/imgs/bilibili.png",
       douyin: "/imgs/douyin.png",
       douyu: "/imgs/douyu.svg",
@@ -237,7 +259,9 @@
     rawAvatarUrl: string,
     rawCoverUrl: string,
   ) {
-    const avatarKey = userId ? `${platform}:${userId}:${rawAvatarUrl}` : `${platform}:${roomId}:${rawAvatarUrl}`;
+    const avatarKey = userId
+      ? `${platform}:${userId}:${rawAvatarUrl}`
+      : `${platform}:${roomId}:${rawAvatarUrl}`;
     const avatarPromise = rawAvatarUrl
       ? fetchImageObjectUrl(avatar_cache, avatarKey, rawAvatarUrl)
       : Promise.resolve(null);
@@ -245,11 +269,15 @@
       ? fetchImageObjectUrl(image_cache, rawCoverUrl, rawCoverUrl)
       : Promise.resolve(null);
 
-    const [avatarUrl, coverUrl] = await Promise.all([avatarPromise, coverPromise]);
+    const [avatarUrl, coverUrl] = await Promise.all([
+      avatarPromise,
+      coverPromise,
+    ]);
     if (!avatarUrl && !coverUrl) return;
 
     const target = summary.recorders.find(
-      (r) => r.room_info.platform === platform && r.room_info.room_id === roomId,
+      (r) =>
+        r.room_info.platform === platform && r.room_info.room_id === roomId,
     );
     if (!target) return;
 
@@ -263,9 +291,38 @@
     }
   }
 
+  /**
+   * 批量加载各直播间的自动切片配置开关状态。
+   */
+  async function updateAutoPolicies(recorders: RecorderInfo[]) {
+    const seq = ++autoPoliciesSeq;
+    const map = new Map<string, boolean>();
+    await Promise.all(
+      recorders.map(async (r) => {
+        try {
+          const res = await getAutomationPolicy(
+            r.room_info.platform,
+            r.room_info.room_id,
+          );
+          if (res?.policy?.enabled) {
+            map.set(`${r.room_info.platform}:${r.room_info.room_id}`, true);
+          }
+        } catch {
+          // 忽略单个策略获取异常
+        }
+      }),
+    );
+    if (seq === autoPoliciesSeq) {
+      roomAutoPolicies = map;
+    }
+  }
+
   const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(update_summary);
 
+  /**
+   * 刷新直播间列表及统计信息。
+   */
   async function update_summary() {
     let new_summary = (await invoke("get_recorder_list")) as RecorderList;
     room_count = new_summary.count;
@@ -282,7 +339,7 @@
       (room) => getDetectionStatus(room) === "unconfirmed",
     ).length;
 
-    // 按当前检测状态排序。
+    // 按当前检测状态排序
     new_summary.recorders.sort((a, b) => {
       const statusOrder: DetectionStatus[] = [
         "live",
@@ -296,116 +353,89 @@
       );
     });
 
-    // 先同步填充已缓存图片或默认图，未命中缓存的图片转入后台异步加载，不阻塞列表更新
+    // 填充已缓存图片或默认图，未命中缓存的图片转入后台异步非阻塞加载
     const pendingHydrations: Array<() => void> = [];
     for (const room of new_summary.recorders) {
       const platform = room.room_info.platform;
       const roomId = room.room_info.room_id;
       const userId = room.user_info.user_id;
-      const rawAvatarUrl = room.user_info.user_avatar;
-      const rawCoverUrl = room.room_info.room_cover;
+      const rawAvatar = room.user_info.user_avatar;
+      const rawCover = room.room_info.room_cover;
+
       const avatarKey = userId
-        ? `${platform}:${userId}:${rawAvatarUrl}`
-        : `${platform}:${roomId}:${rawAvatarUrl}`;
+        ? `${platform}:${userId}:${rawAvatar}`
+        : `${platform}:${roomId}:${rawAvatar}`;
+      const cachedAvatar = rawAvatar ? avatar_cache.get(avatarKey) : null;
+      const cachedCover = rawCover ? image_cache.get(rawCover) : null;
 
-      const cachedAvatar = rawAvatarUrl ? avatar_cache.get(avatarKey) : undefined;
       room.user_info.user_avatar = cachedAvatar || default_avatar(platform);
+      room.room_info.room_cover =
+        cachedCover || (cachedAvatar ? cachedAvatar : default_cover(platform));
 
-      const cachedCover = rawCoverUrl ? image_cache.get(rawCoverUrl) : undefined;
-      if (cachedCover) {
-        room.room_info.room_cover = cachedCover;
-      } else if (!rawCoverUrl && cachedAvatar) {
-        room.room_info.room_cover = cachedAvatar;
-      } else {
-        room.room_info.room_cover = default_cover(platform);
-      }
-
-      if ((rawAvatarUrl && !cachedAvatar) || (rawCoverUrl && !cachedCover)) {
-        pendingHydrations.push(() => {
-          void hydrateRoomImages(
-            platform,
-            roomId,
-            userId,
-            rawAvatarUrl,
-            rawCoverUrl,
-          );
-        });
+      if (
+        (rawAvatar && !cachedAvatar) ||
+        (rawCover && !cachedCover) ||
+        (!rawCover && rawAvatar && !cachedAvatar)
+      ) {
+        pendingHydrations.push(() =>
+          hydrateRoomImages(platform, roomId, userId, rawAvatar, rawCover),
+        );
       }
     }
 
     summary = new_summary;
-    for (const startHydration of pendingHydrations) {
-      startHydration();
+
+    for (const hydrate of pendingHydrations) {
+      hydrate();
     }
+
+    void updateAutoPolicies(new_summary.recorders);
   }
-  onMount(() =>
-    watchStateChanges(stateRefresh, ["recorders-changed"], 30_000, pageVisibility),
-  );
-
-  let searchInput: HTMLInputElement | null = $state(null);
 
   onMount(() =>
-    registerCommands([
-      {
-        id: "room:add",
-        group: "action",
-        title: "添加直播间",
-        detail: "直播间",
-        icon: Plus,
-        keywords: ["add room", "new room", "record"],
-        page: "直播间",
-        run: () => (addModal = true),
-      },
-      {
-        id: "room:search",
-        group: "action",
-        title: "搜索直播间",
-        detail: "直播间",
-        icon: Search,
-        keywords: ["search room", "find", "filter"],
-        page: "直播间",
-        run: () => searchInput?.focus({ preventScroll: true }),
-      },
-    ]),
+    watchStateChanges(
+      stateRefresh,
+      ["recorders-changed"],
+      30_000,
+      pageVisibility,
+    ),
   );
 
-  // modals
   let deleteModal = $state(false);
-  let deleteRoom = $state(null);
+  let deleteRoom: RecorderInfo | null = $state(null);
 
   let addModal = $state(false);
   let addRoom = $state("");
   let selectedPlatform = $state("bilibili");
 
   let archiveModal = $state(false);
-  let archiveRoom: RecorderInfo = $state(null);
+  let archiveRoom: RecorderInfo | null = $state(null);
   let archives: RecordItem[] = $state([]);
-
-  // 分页相关状态
   let currentPage = $state(0);
-  let pageSize = 20;
+  const pageSize = 20;
   let hasMore = $state(true);
   let isLoading = $state(false);
   let loadError = $state("");
 
-  async function showArchives(room_id: string) {
-    // 重置分页状态
+  /**
+   * 打开指定房间的历史录播归档弹窗。
+   */
+  async function showArchives(roomId: string) {
     currentPage = 0;
     archives = [];
     hasMore = true;
-    isLoading = false;
     loadError = "";
-
-    updateArchives();
+    await updateArchives();
     archiveModal = true;
-    console.log(archives);
   }
 
+  /**
+   * 分页拉取录播归档记录。
+   */
   async function updateArchives() {
-    if (isLoading || !hasMore) return;
+    if (isLoading || !hasMore || !archiveRoom) return;
 
     isLoading = true;
-
     try {
       let new_archives = (await invoke("get_archives", {
         roomId: archiveRoom.room_info.room_id,
@@ -420,29 +450,22 @@
         );
       }
 
-      // 如果是第一页，直接替换；否则追加数据
       if (currentPage === 0) {
         archives = new_archives;
       } else {
         archives = [...archives, ...new_archives];
       }
 
-      // 检查是否还有更多数据
       hasMore = new_archives.length === pageSize;
-
-      // 按时间排序
       archives.sort((a, b) => {
         return (
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         );
       });
 
-      // 更新总数（如果后端支持的话）
-      // totalCount = await invoke("get_archives_count", { roomId: archiveRoom.room_id });
-
       currentPage++;
     } catch (error) {
-      console.error("Failed to load archives:", error);
+      console.error("加载录播归档失败:", error);
       loadError = "加载失败，请重试";
     } finally {
       isLoading = false;
@@ -453,11 +476,10 @@
     await updateArchives();
   }
 
-  function handleScroll(event: Event) {
+  function handleArchiveScroll(event: Event) {
     const target = event.target as HTMLElement;
     const { scrollTop, scrollHeight, clientHeight } = target;
 
-    // 当滚动到距离底部100px时，自动加载更多
     if (
       scrollHeight - scrollTop - clientHeight < 100 &&
       hasMore &&
@@ -481,78 +503,17 @@
       .toString()
       .padStart(2, "0");
     const seconds = (duration % 60).toString().padStart(2, "0");
-
     return `${hours}:${minutes}:${seconds}`;
   }
 
   function calc_bitrate(size: number, duration: number) {
+    if (duration <= 0) return "0";
     return ((size * 8) / duration / 1024).toFixed(0);
   }
 
-  function handleModalClickOutside(event) {
-    // 检查点击是否在任何modal内部
-    const clickedElement = event.target;
-
-    // 检查是否点击了按钮，如果是则不关闭modal
-    if (clickedElement.closest("button")) {
-      return;
-    }
-
-    // 按层级顺序检查modal，优先处理最上层的modal
-    // 如果点击在最上层modal内部，则不处理任何modal关闭
-
-    // 最上层：generateWholeClipModal (handled by component)
-    if (generateWholeClipModal) {
-      return; // Let the component handle its own modal closing
-    }
-
-    // 第二层：archiveModal
-    if (archiveModal) {
-      const archiveModalEl = document.querySelector(".archive-modal");
-      if (archiveModalEl) {
-        if (archiveModalEl.contains(clickedElement)) {
-          // 点击在archiveModal内部，不关闭任何modal
-          return;
-        } else {
-          // 点击在archiveModal外部，关闭它
-          archiveModal = false;
-          return;
-        }
-      }
-    }
-
-    // 第三层：addModal
-    if (addModal) {
-      const addModalEl = document.querySelector(".add-modal");
-      if (addModalEl) {
-        if (addModalEl.contains(clickedElement)) {
-          // 点击在addModal内部，不关闭任何modal
-          return;
-        } else {
-          // 点击在addModal外部，关闭它
-          addModal = false;
-          return;
-        }
-      }
-    }
-
-    // 第四层：deleteModal
-    if (deleteModal) {
-      const deleteModalEl = document.querySelector(".delete-modal");
-      if (deleteModalEl) {
-        if (deleteModalEl.contains(clickedElement)) {
-          // 点击在deleteModal内部，不关闭任何modal
-          return;
-        } else {
-          // 点击在deleteModal外部，关闭它
-          deleteModal = false;
-          return;
-        }
-      }
-    }
-  }
-
-  // Function to toggle auto-record state
+  /**
+   * 切换自动录制使能状态。
+   */
   function toggleEnabled(room: RecorderInfo) {
     invoke("set_enable", {
       roomId: room.room_info.room_id,
@@ -561,11 +522,13 @@
     });
   }
 
+  /**
+   * 打开主播空间或主页。
+   */
   function openUserUrl(room: RecorderInfo) {
     if (room.room_info.platform === "bilibili") {
       open("https://space.bilibili.com/" + room.user_info.user_id);
     } else if (room.room_info.platform === "douyin") {
-      console.log(room.user_info);
       open("https://www.douyin.com/user/" + room.user_info.user_id);
     } else if (room.room_info.platform === "douyu") {
       openLiveUrl(room);
@@ -595,8 +558,14 @@
     }
   }
 
+  /**
+   * 打开网页端直播间页面。
+   */
   function openLiveUrl(room: RecorderInfo) {
-    if (room.room_info.platform === "douyin" && room.identifier_type === "profile") {
+    if (
+      room.room_info.platform === "douyin" &&
+      room.identifier_type === "profile"
+    ) {
       if (room.room_resolved && room.web_rid) {
         open("https://live.douyin.com/" + room.web_rid);
       } else {
@@ -608,11 +577,16 @@
     if (url) open(url);
   }
 
+  /**
+   * 添加新录制直播间。
+   */
   function addNewRecorder(room_id: string, platform: string) {
     const room_input = room_id.trim();
     const douyu_room_id =
       platform === "douyu"
-        ? new URLSearchParams(room_input.split("?")[1]?.split("#")[0] || "").get("rid")
+        ? new URLSearchParams(
+            room_input.split("?")[1]?.split("#")[0] || "",
+          ).get("rid")
         : null;
     room_id =
       platform === "youtube" || platform === "douyin"
@@ -623,45 +597,34 @@
     }
     switch (platform) {
       case "bilibili":
-        // room_id might be a link, extract the room_id from the link
-        // example: https://live.bilibili.com/1234567890
         if (room_id.includes("https://") || room_id.includes("bsr://")) {
-          room_id = room_id.split("/").pop();
+          room_id = room_id.split("/").pop() || "";
         }
         break;
       case "douyin":
-        // 保留完整链接，由后端区分主页、分享链接和直播间链接。
         break;
       case "douyu":
-        // Douyu accepts numeric room IDs and vanity paths.
-        // Keep only the path segment so the backend can resolve a vanity path.
         if (room_id.includes("://")) {
-          room_id = room_id.split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop() || "";
+          room_id =
+            room_id.split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop() || "";
         }
         break;
       case "huya":
-        // room_id might be a link, extract the room_id from the link
-        // example: https://www.huya.com/1234567890
         if (room_id.includes("https://") || room_id.includes("bsr://")) {
-          room_id = room_id.split("/").pop();
+          room_id = room_id.split("/").pop() || "";
         }
         break;
       case "kuaishou":
-        // room_id might be a link, extract the room_id from the link
-        // example: https://live.kuaishou.com/u/1234567890
         if (room_id.includes("https://") || room_id.includes("bsr://")) {
-          room_id = room_id.split("/").pop();
+          room_id = room_id.split("/").pop() || "";
         }
         break;
       case "tiktok":
-        // room_id might be a link, extract the room_id from the link
-        // example: https://www.tiktok.com/@1234567890/live -> @1234567890
         if (room_id.includes("https://") || room_id.includes("bsr://")) {
-          room_id = "@" + room_id.split("@").pop().split("/")[0];
+          room_id = "@" + room_id.split("@").pop()?.split("/")[0];
         }
         break;
       case "twitch":
-        // Twitch accepts a channel login or https://www.twitch.tv/<login>.
         if (room_id.includes("https://") || room_id.includes("bsr://")) {
           room_id = room_id
             .replace(/^(?:https?:|bsr:)\/\/(?:(?:www|m)\.)?twitch\.tv\//, "")
@@ -670,8 +633,6 @@
         room_id = room_id.replace(/^@/, "");
         break;
       case "youtube":
-        // Keep the URL intact. The recorder resolves a channel to its current
-        // live video on each poll, while a watch URL pins one broadcast.
         if (room_id.startsWith("bsr://")) {
           room_id = room_id.replace("bsr://", "https://");
         }
@@ -693,8 +654,11 @@
   }
 
   let generateWholeClipModal = $state(false);
-  let generateWholeClipArchive: RecordItem = $state(null);
+  let generateWholeClipArchive: RecordItem | null = $state(null);
 
+  /**
+   * 打开整场切片导出弹窗。
+   */
   async function openGenerateWholeClipModal(archive: RecordItem) {
     generateWholeClipModal = true;
     generateWholeClipArchive = archive;
@@ -705,53 +669,35 @@
     generateWholeClipArchive = null;
   }
 
-  onMount(async () => {
-    await onOpenUrl((urls: string[]) => {
-      console.log("Received Deep Link:", urls);
+  onMount(() => {
+    // 监听深层链接
+    void onOpenUrl((urls: string[]) => {
+      console.log("收到 Deep Link:", urls);
       if (urls.length > 0) {
         const url = urls[0];
-        // extract platform and room_id from url
-        // url example:
-        // bsr://live.bilibili.com/167537?live_from=85001&spm_id_from=333.1365.live_users.item.click
-        // bsr://live.douyin.com/200525029536
-
         let platform = "";
 
-        if (url.startsWith("bsr://live.bilibili.com/")) {
-          platform = "bilibili";
-        }
-
-        if (url.startsWith("bsr://live.douyin.com/")) {
-          platform = "douyin";
-        }
-
-        if (url.startsWith("bsr://www.douyu.com/") || url.startsWith("bsr://live.douyu.com/")) {
+        if (url.startsWith("bsr://live.bilibili.com/")) platform = "bilibili";
+        if (url.startsWith("bsr://live.douyin.com/")) platform = "douyin";
+        if (
+          url.startsWith("bsr://www.douyu.com/") ||
+          url.startsWith("bsr://live.douyu.com/")
+        )
           platform = "douyu";
-        }
-
-        if (url.startsWith("bsr://live.kuaishou.com/")) {
-          platform = "kuaishou";
-        }
-
-        if (url.startsWith("bsr://live.tiktok.com/")) {
-          platform = "tiktok";
-        }
-
+        if (url.startsWith("bsr://live.kuaishou.com/")) platform = "kuaishou";
+        if (url.startsWith("bsr://live.tiktok.com/")) platform = "tiktok";
         if (
           url.startsWith("bsr://www.twitch.tv/") ||
           url.startsWith("bsr://m.twitch.tv/") ||
           url.startsWith("bsr://twitch.tv/")
-        ) {
+        )
           platform = "twitch";
-        }
-
         if (
           url.startsWith("bsr://www.youtube.com/") ||
           url.startsWith("bsr://youtube.com/") ||
           url.startsWith("bsr://youtu.be/")
-        ) {
+        )
           platform = "youtube";
-        }
 
         if (url && platform) {
           addModal = true;
@@ -760,217 +706,296 @@
         }
       }
     });
+
+    // 监听来自其他页面（如总览页）的添加直播间联动请求
+    const handleOpenAdd = () => {
+      addModal = true;
+    };
+    window.addEventListener("open-add-room", handleOpenAdd);
+
+    // 监听全局点击以关闭卡片更多操作菜单
+    const handleDocClick = () => {
+      openMenuRoomKey = null;
+    };
+    window.addEventListener("click", handleDocClick);
+
+    return () => {
+      window.removeEventListener("open-add-room", handleOpenAdd);
+      window.removeEventListener("click", handleDocClick);
+    };
   });
+
+  onMount(() =>
+    registerCommands([
+      {
+        id: "room:add",
+        group: "action",
+        title: "添加直播间",
+        detail: "直播间",
+        icon: Plus,
+        keywords: ["add room", "new room", "record"],
+        page: "直播间",
+        run: () => (addModal = true),
+      },
+      {
+        id: "room:search",
+        group: "action",
+        title: "搜索直播间",
+        detail: "直播间",
+        icon: Search,
+        keywords: ["search room", "find", "filter"],
+        page: "直播间",
+        run: () => searchInput?.focus({ preventScroll: true }),
+      },
+    ]),
+  );
 </script>
 
-<div
-  class="flex-1 p-6 overflow-auto custom-scrollbar-light bg-gray-50 dark:bg-black"
->
-  <div class="space-y-6">
-    <!-- Header -->
-    <div class="flex justify-between items-center">
-      <div class="flex items-center space-x-4">
-        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">
-          直播间
-        </h1>
-        <div
-          class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500 dark:text-gray-400"
-        >
-          <span class="flex items-center space-x-1">
-            <span class="w-2 h-2 rounded-full bg-green-500"></span>
+<PageTitlebar title="直播间" />
+
+<div class="flex-1 overflow-y-auto bg-canvas p-6 custom-scrollbar-light">
+  <div class="space-y-5 max-w-[1400px] mx-auto">
+    <!-- 页头：标题、四态检测摘要与添加直播间按钮 -->
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <div>
+        <h1 class="text-[21px] font-semibold tracking-tight text-fg">直播间</h1>
+        <p class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-fg-muted">
+          <span class="flex items-center gap-1.5 text-success-fg">
+            <span class="h-1.5 w-1.5 rounded-full bg-success"></span>
             <span>{room_active} 直播中</span>
           </span>
           <span>•</span>
           <span>{room_inactive} 未直播</span>
           {#if room_unknown > 0}
             <span>•</span>
-            <span>{room_unknown} 状态未知</span>
+            <span class="text-warning-fg">{room_unknown} 状态未知</span>
           {/if}
           {#if room_unconfirmed > 0}
             <span>•</span>
             <span>{room_unconfirmed} 待检测</span>
           {/if}
-        </div>
+        </p>
       </div>
-      <div class="flex items-center space-x-3">
-        <div class="relative">
-          <Search
-            class="w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500"
-          />
-          <input
-            type="text"
-            bind:value={searchQuery}
-            placeholder="搜索直播间..."
-            class="pl-10 pr-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700/50 border border-gray-200 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 text-gray-900 dark:text-white"
-          />
-        </div>
-        <button
-          class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-2"
-          onclick={() => {
-            addModal = true;
-          }}
-        >
-          <Plus class="w-5 h-5 icon-white" />
-          <span>添加新直播间</span>
-        </button>
+      <button
+        type="button"
+        class="ui-btn ui-btn-primary"
+        onclick={() => (addModal = true)}
+      >
+        <Plus class="h-4 w-4" />
+        <span>添加直播间</span>
+      </button>
+    </div>
+
+    <!-- 顶部工具栏：平台筛选胶囊栏与搜索框 -->
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
+      <!-- 平台筛选胶囊栏 -->
+      <div class="flex flex-wrap gap-1" role="tablist" aria-label="平台筛选">
+        {#each platformFilters as filter}
+          <button
+            type="button"
+            class="px-2.5 py-1 text-[12px] rounded-[6px] transition-colors cursor-pointer {selectedPlatformFilter === filter.id
+              ? 'bg-accent-soft text-accent-fg font-medium'
+              : 'text-fg-muted hover:text-fg hover:bg-control-hover'}"
+            onclick={() => (selectedPlatformFilter = filter.id)}
+          >
+            {filter.label}
+          </button>
+        {/each}
+      </div>
+
+      <!-- 搜索输入框 -->
+      <div class="relative w-full sm:w-64">
+        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-fg-muted" />
+        <input
+          bind:this={searchInput}
+          type="search"
+          bind:value={searchQuery}
+          placeholder="搜索主播、标题或房间号"
+          class="ui-input w-full pl-8"
+          aria-label="搜索主播、标题或房间号"
+        />
       </div>
     </div>
 
-<div class="custom-scrollbar-light flex-1 overflow-auto bg-canvas p-5">
-  <div class="space-y-6">
-    <!-- Room Grid -->
-    <div class="grid grid-cols-3 gap-4">
-      <!-- Active Room Card -->
-      {#each filteredRecorders as room (room.room_info.room_id)}
-        {@const detectionStatus = getDetectionStatus(room)}
-        <div
-          class="p-4 rounded-xl bg-white dark:bg-[#3c3c3e] border border-gray-200 dark:border-gray-700 hover:border-blue-500 dark:hover:border-blue-400 transition-colors"
-        >
-          <div class="relative">
-            <img
-              src={room.room_info.room_cover}
-              alt="cover"
-              class={"w-full h-40 object-cover rounded-lg " +
-                (detectionStatus === "offline" ? "brightness-75" : "")}
-            />
-            <!-- Room ID watermark -->
-            <div
-              class="absolute bottom-2 left-2 flex h-6 max-w-[55%] items-center rounded-[6px] bg-black/50 px-1.5 backdrop-blur-sm"
-            >
-              <span class="truncate font-mono text-[11px] text-white/85"
-                >{room.room_info.platform.toUpperCase()}#{room.room_info
-                  .room_id}</span
-              >
-            </div>
-            {#if room.enabled}
-              <div
-                class={"absolute top-2 left-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center " +
-                  (room.recording ? "bg-red-500" : "bg-gray-700/90")}
-              >
-                <AutoRecordIcon class="w-4 h-4 text-white" />
-                {#if room.recording}
-                  <span class="text-white ml-1">录制中</span>
+    <!-- 直播间卡片网格 -->
+    {#if filteredRecorders.length > 0}
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {#each filteredRecorders as room (`${room.room_info.platform}:${room.room_info.room_id}`)}
+          {@const detectionStatus = getDetectionStatus(room)}
+          <article class="ui-card relative flex flex-col overflow-hidden hover:border-line-strong transition-colors">
+            <!-- 封面媒体区域 -->
+            <div class="relative h-40 w-full overflow-hidden bg-sunken">
+              <img
+                src={room.room_info.room_cover}
+                alt="cover"
+                class="h-full w-full object-cover transition-opacity {detectionStatus === 'offline'
+                  ? 'opacity-70'
+                  : ''}"
+              />
+
+              <!-- 四态检测徽章（左上角） -->
+              <div class="absolute top-2 left-2 flex items-center">
+                {#if detectionStatus === "live"}
+                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[5px] text-[11px] font-medium bg-surface/90 text-success-fg backdrop-blur shadow-sm">
+                    <span class="h-1.5 w-1.5 rounded-full bg-success"></span>
+                    <span>{getDetectionLabel(detectionStatus)}</span>
+                  </span>
+                {:else if detectionStatus === "offline"}
+                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[5px] text-[11px] font-medium bg-surface/90 text-fg-muted backdrop-blur shadow-sm">
+                    <span class="h-1.5 w-1.5 rounded-full bg-fg-muted/60"></span>
+                    <span>{getDetectionLabel(detectionStatus)}</span>
+                  </span>
+                {:else if detectionStatus === "unconfirmed"}
+                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[5px] text-[11px] font-medium bg-surface/90 text-fg-muted backdrop-blur shadow-sm">
+                    <span class="h-1.5 w-1.5 rounded-full bg-fg-muted/60"></span>
+                    <span>{getDetectionLabel(detectionStatus)}</span>
+                  </span>
+                {:else}
+                  <span
+                    class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[5px] text-[11px] font-medium bg-warning-soft text-warning-fg backdrop-blur shadow-sm"
+                    title={getDetectionErrorMessage(room)}
+                  >
+                    <span class="h-1.5 w-1.5 rounded-full bg-warning"></span>
+                    <span>{getDetectionLabel(detectionStatus)}</span>
+                  </span>
                 {/if}
               </div>
-            {/if}
-            {#if detectionStatus === "offline"}
-              <div
-                class={"absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-gray-700"}
-              >
-                <span>{getDetectionLabel(detectionStatus)}</span>
+
+              <!-- 房间号水印（左下角） -->
+              <div class="absolute bottom-2 left-2 flex items-center">
+                <span class="font-mono text-[10px] text-white/90 bg-black/60 px-1.5 py-0.5 rounded-[4px] backdrop-blur-sm tracking-tight">
+                  {room.room_info.platform.toUpperCase()}#{room.room_info.room_id}
+                </span>
               </div>
-            {:else if detectionStatus === "live"}
-              <div
-                class={"absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-green-500"}
-              >
-                <span>{getDetectionLabel(detectionStatus)}</span>
-              </div>
-            {:else if detectionStatus === "unconfirmed"}
-              <div
-                class="absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-gray-700"
-              >
-                <span>{getDetectionLabel(detectionStatus)}</span>
-              </div>
-            {:else}
-              <div
-                class="absolute bottom-2 right-2 p-1.5 px-2 rounded-md text-white text-xs flex items-center justify-center bg-amber-600"
-                title={getDetectionErrorMessage(room)}
-              >
-                <span>{getDetectionLabel(detectionStatus)}</span>
-              </div>
-            {/if}
-            <button
-              class="absolute top-2 right-2 p-1.5 rounded-lg bg-gray-900/50 hover:bg-gray-900/70 transition-colors"
-            >
-              <Ellipsis class="w-5 h-5 icon-white" />
-            </button>
-            <Dropdown class="whitespace-nowrap">
-              <button
-                class="px-4 py-2 flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer"
-                onclick={() => toggleEnabled(room)}
-              >
-                <span
-                  class="text-sm text-gray-700 dark:text-gray-200 font-medium"
-                  >启用直播间</span
-                >
-                <label class="toggle-switch ml-1">
-                  <input type="checkbox" checked={room.enabled} />
-                  <span class="toggle-slider"></span>
-                </label>
-              </button>
-              <DropdownItem
-                onclick={() => {
-                  openLiveUrl(room);
-                }}>打开网页直播间</DropdownItem
-              >
-              <DropdownItem
-                onclick={() => {
-                  selectedAutomationRoom = room;
-                  showAutomationDialog = true;
-                }}>自动切片设置</DropdownItem
-              >
-              <DropdownItem
-                class="text-red-500"
-                onclick={() => {
-                  deleteRoom = room;
-                  deleteModal = true;
-                }}>移除直播间</DropdownItem
-              >
-            </Dropdown>
-          </div>
-          <div class="mt-3 space-y-2">
-            <div class="flex items-start justify-between">
-              <div>
-                <div class="flex items-center space-x-2">
-                  <span class="shrink-0">
-                    {#if room.room_info.platform === "bilibili"}
-                      <BilibiliIcon class="w-4 h-4" />
-                    {:else if room.room_info.platform === "douyin"}
-                      <DouyinIcon class="w-4 h-4" />
-                    {:else if room.room_info.platform === "douyu"}
-                      <DouyuIcon class="w-4 h-4" />
-                    {:else if room.room_info.platform === "kuaishou"}
-                      <KuaishouIcon class="w-4 h-4" />
-                    {:else if room.room_info.platform === "huya"}
-                      <HuyaIcon class="w-4 h-4" />
-                    {:else if room.room_info.platform === "tiktok"}
-                      <TikTokIcon class="w-5 h-5" />
-                    {:else if room.room_info.platform === "twitch"}
-                      <TwitchIcon class="w-5 h-5 text-purple-600" />
-                    {:else if room.room_info.platform === "youtube"}
-                      <YouTubeIcon class="w-4 h-4" />
-                    {:else}
-                      <Globe class="w-4 h-4 text-gray-400" />
-                    {/if}
+
+              <!-- 正在录制中提示（右下角） -->
+              {#if room.recording}
+                <div class="absolute bottom-2 right-2 flex items-center">
+                  <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-danger text-white text-[10px] font-medium shadow-sm">
+                    <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+                    <span>录制中</span>
                   </span>
-                  <h3 class="font-medium text-gray-900 dark:text-white">
-                    {room.room_info.room_title}
-                  </h3>
                 </div>
+              {/if}
+
+              <!-- 更多操作菜单按钮（右上角） -->
+              <div class="absolute top-2 right-2">
+                <button
+                  type="button"
+                  class="flex h-7 w-7 items-center justify-center rounded-[6px] bg-surface/85 text-fg-secondary hover:bg-surface hover:text-fg shadow-sm backdrop-blur transition-colors cursor-pointer"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    const key = `${room.room_info.platform}:${room.room_info.room_id}`;
+                    openMenuRoomKey = openMenuRoomKey === key ? null : key;
+                  }}
+                  aria-label="更多操作"
+                >
+                  <Ellipsis class="h-4 w-4" />
+                </button>
+
+                {#if openMenuRoomKey === `${room.room_info.platform}:${room.room_info.room_id}`}
+                  <div
+                    class="ui-menu absolute right-0 top-8 z-30 min-w-[145px]"
+                    role="menu"
+                    tabindex="-1"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      class="ui-menu-item"
+                      onclick={() => {
+                        openMenuRoomKey = null;
+                        selectedAutomationRoom = room;
+                        showAutomationDialog = true;
+                      }}
+                    >
+                      <Sparkles class="h-3.5 w-3.5 text-accent-fg" />
+                      <span>自动切片设置</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="ui-menu-item"
+                      onclick={() => {
+                        openMenuRoomKey = null;
+                        openLiveUrl(room);
+                      }}
+                    >
+                      <Globe class="h-3.5 w-3.5 text-fg-muted" />
+                      <span>打开网页直播间</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="ui-menu-item text-danger hover:bg-danger-soft hover:text-danger-fg"
+                      onclick={() => {
+                        openMenuRoomKey = null;
+                        deleteRoom = room;
+                        deleteModal = true;
+                      }}
+                    >
+                      <Trash2 class="h-3.5 w-3.5" />
+                      <span>移除直播间</span>
+                    </button>
+                  </div>
+                {/if}
               </div>
             </div>
-            <div class="flex items-center justify-between">
-              <div
-                class="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400"
-              >
-                <button
-                  class="flex items-center space-x-2 p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
-                  onclick={() => {
-                    openUserUrl(room);
-                  }}
-                >
-                  <img
-                    src={room.user_info.user_avatar}
-                    alt="avatar"
-                    class="w-8 h-8 rounded-full"
-                  />
-                  <span>{room.user_info.user_name}</span>
-                </button>
-              </div>
-              <div class="flex items-center space-x-1">
-                {#if room.recording}
+
+            <!-- 卡片内容区域 -->
+            <div class="p-3.5 flex-1 flex flex-col justify-between">
+              <div>
+                <!-- 标题行与自动切片标签 -->
+                <div class="flex items-center justify-between gap-2">
+                  <h3
+                    class="truncate text-[13px] font-semibold text-fg"
+                    title={room.room_info.room_title}
+                  >
+                    {room.room_info.room_title || "未命名直播间"}
+                  </h3>
+                  {#if roomAutoPolicies.get(`${room.room_info.platform}:${room.room_info.room_id}`)}
+                    <span class="ui-badge ui-badge-accent gap-1 shrink-0">
+                      <Sparkles class="h-3 w-3" />
+                      <span>自动切片</span>
+                    </span>
+                  {/if}
+                </div>
+
+                <!-- 主播信息与平台标签 -->
+                <div class="flex items-center gap-2 text-[12px] text-fg-muted mt-2">
                   <button
-                    class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    type="button"
+                    class="flex items-center gap-1.5 hover:text-fg transition-colors truncate text-left cursor-pointer"
+                    onclick={() => openUserUrl(room)}
+                  >
+                    <img
+                      src={room.user_info.user_avatar}
+                      alt=""
+                      class="h-5 w-5 rounded-full object-cover shrink-0 border border-line bg-sunken"
+                    />
+                    <span class="truncate font-medium">{room.user_info.user_name}</span>
+                  </button>
+                  <span class="ml-auto text-[11px] text-fg-faint shrink-0">
+                    {room.room_info.platform}
+                  </span>
+                </div>
+
+                <!-- 异常状态提示 -->
+                {#if detectionStatus === "unknown"}
+                  <p
+                    class="mt-2 break-words text-[11px] text-warning-fg"
+                    title={getDetectionErrorMessage(room)}
+                  >
+                    {getDetectionErrorMessage(room)}
+                  </p>
+                {/if}
+              </div>
+
+              <!-- 卡片底栏：快捷操作按钮与自动录制开关 -->
+              <div class="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2.5 mt-3">
+                <div class="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    class="ui-btn ui-btn-ghost ui-btn-sm"
                     onclick={() => {
                       invoke("open_live", {
                         platform: room.room_info.platform,
@@ -979,403 +1004,362 @@
                       });
                     }}
                   >
-                    <Play class="w-5 h-5 dark:icon-white" />
+                    预览
                   </button>
-                {/if}
-                <button
-                  class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
-                  onclick={() => {
-                    archiveRoom = room;
-                    showArchives(room.room_info.room_id);
-                  }}
-                >
-                  <History class="w-5 h-5 dark:icon-white" />
-                </button>
+                  <button
+                    type="button"
+                    class="ui-btn ui-btn-ghost ui-btn-sm"
+                    onclick={() => {
+                      archiveRoom = room;
+                      showArchives(room.room_info.room_id);
+                    }}
+                  >
+                    录播
+                  </button>
+                </div>
+                <label class="flex items-center gap-2 cursor-pointer text-[12px] text-fg-muted select-none">
+                  <span>自动录制</span>
+                  <span class="ui-switch">
+                    <input
+                      type="checkbox"
+                      checked={room.enabled}
+                      onchange={() => toggleEnabled(room)}
+                    />
+                    <span></span>
+                  </span>
+                </label>
               </div>
             </div>
-            {#if room.room_info.platform === "douyin" && room.identifier_type === "profile"}
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {room.room_resolved ? "房间号已解析" : "房间号待解析"}
-              </p>
-            {/if}
-            {#if detectionStatus === "unknown"}
-              <p
-                class="mt-1 break-words text-xs text-amber-700 dark:text-amber-400"
-                title={getDetectionErrorMessage(room)}
-              >
-                {getDetectionErrorMessage(room)}
-              </p>
-            {/if}
-          </div>
-        </div>
-      {/each}
-
-      <!-- Add Room Card -->
-      <button
-        class="p-4 rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-600 hover:border-blue-500 dark:hover:border-blue-400 transition-colors flex flex-col items-center justify-center space-y-2"
-        onclick={() => {
-          addModal = true;
-        }}
-      >
-        <div
-          class="w-12 h-12 rounded-full bg-blue-500/10 flex items-center justify-center"
-        >
-          <Plus class="w-6 h-6 icon-primary" />
-        </div>
-        <span class="text-sm font-medium text-blue-600 dark:text-blue-400"
-          >添加新直播间</span
-        >
-        <span class="text-xs text-gray-500 dark:text-gray-400"
-          >配置一个新直播间以及其相关设置</span
-        >
-      </button>
-    </div>
+          </article>
+        {/each}
+      </div>
+    {:else}
+      <!-- 搜索或平台筛选无匹配结果时的空状态视图 -->
+      <div class="ui-card py-16 text-center text-fg-muted">
+        <Search class="mx-auto h-8 w-8 opacity-60 mb-3" />
+        <h3 class="text-[14px] font-medium text-fg mb-1">没有匹配的直播间</h3>
+        <p class="text-[12px]">试试其他名称，或切换直播平台。</p>
+      </div>
+    {/if}
   </div>
 </div>
-</div>
-</div>
+
+<!-- 移除直播间确认弹窗 -->
 {#if deleteModal}
   <div
-    class="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center"
-    transition:fade={{ duration: 200 }}
+    class="ui-modal-backdrop"
+    role="presentation"
+    transition:fade={{ duration: 150 }}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) deleteModal = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === "Escape") deleteModal = false;
+    }}
   >
     <div
-      class="mac-modal delete-modal w-[320px] bg-white dark:bg-[#323234] rounded-xl shadow-xl overflow-hidden"
+      class="ui-modal w-[360px]"
       transition:scale={{ duration: 150, start: 0.95 }}
     >
-      <div class="p-6 space-y-4">
-        <div class="text-center space-y-2">
-          <h3 class="text-base font-medium text-gray-900 dark:text-white">
-            移除直播间
-          </h3>
-          <p class="text-sm text-gray-500 dark:text-gray-400">
-            此操作将移除所有相关的录制记录
-          </p>
-        </div>
-        <div class="flex justify-center space-x-3">
-          <button
-            class="w-24 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600 rounded-lg transition-colors"
-            onclick={() => {
+      <div class="ui-modal-header">
+        <span>移除直播间</span>
+        <button
+          type="button"
+          class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon"
+          onclick={() => (deleteModal = false)}
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
+      <div class="ui-modal-body text-center py-5">
+        <p class="text-[14px] font-medium text-fg">确认移除此直播间？</p>
+        <p class="mt-1 text-[12px] text-fg-muted">
+          此操作将移除直播间及其所有关联的录制记录，且无法撤销。
+        </p>
+      </div>
+      <div class="ui-modal-footer">
+        <button
+          type="button"
+          class="ui-btn"
+          onclick={() => (deleteModal = false)}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          class="ui-btn ui-btn-danger"
+          onclick={async () => {
+            if (!deleteRoom) return;
+            try {
+              await invoke("remove_recorder", {
+                roomId: deleteRoom.room_info.room_id,
+                platform: deleteRoom.room_info.platform,
+              });
               deleteModal = false;
-            }}
-          >
-            取消
-          </button>
-          <button
-            class="w-24 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
-            onclick={async () => {
-              try {
-                await invoke("remove_recorder", {
-                  roomId: deleteRoom.room_info.room_id,
-                  platform: deleteRoom.room_info.platform,
-                });
-                deleteModal = false;
-              } catch (e) {
-                await message(String(e));
-              }
-            }}
-          >
-            移除
-          </button>
-        </div>
+            } catch (e) {
+              await message(String(e));
+            }
+          }}
+        >
+          移除
+        </button>
       </div>
     </div>
   </div>
 {/if}
 
+<!-- 添加直播间弹窗 -->
 {#if addModal}
   <div
-    class="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center"
-    transition:fade={{ duration: 200 }}
+    class="ui-modal-backdrop"
+    role="presentation"
+    transition:fade={{ duration: 150 }}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) addModal = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === "Escape") addModal = false;
+    }}
   >
     <div
-      class="mac-modal add-modal w-[400px] bg-white dark:bg-[#323234] rounded-xl shadow-xl overflow-hidden"
+      class="ui-modal w-[440px]"
       transition:scale={{ duration: 150, start: 0.95 }}
     >
-      <!-- Header -->
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700/50">
-        <h2 class="text-base font-medium text-gray-900 dark:text-white">
-          添加直播间
-        </h2>
+      <div class="ui-modal-header">
+        <span>添加直播间</span>
+        <button
+          type="button"
+          class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon"
+          onclick={() => (addModal = false)}
+        >
+          <X class="h-4 w-4" />
+        </button>
       </div>
-
-      <div class="p-6 space-y-6">
-        <div class="space-y-4">
-          <PlatformIconTabs
-            bind:value={selectedPlatform}
-            platforms={[
-              { id: "bilibili", label: "哔哩哔哩" },
-              { id: "douyin", label: "抖音" },
-              { id: "douyu", label: "斗鱼" },
-              { id: "huya", label: "虎牙" },
-              { id: "kuaishou", label: "快手" },
-              { id: "tiktok", label: "TikTok" },
-              { id: "twitch", label: "Twitch" },
-              { id: "youtube", label: "YouTube" },
-            ]}
+      <div class="ui-modal-body space-y-4">
+        <PlatformIconTabs
+          bind:value={selectedPlatform}
+          platforms={[
+            { id: "bilibili", label: "哔哩哔哩" },
+            { id: "douyin", label: "抖音" },
+            { id: "douyu", label: "斗鱼" },
+            { id: "huya", label: "虎牙" },
+            { id: "kuaishou", label: "快手" },
+            { id: "tiktok", label: "TikTok" },
+            { id: "twitch", label: "Twitch" },
+            { id: "youtube", label: "YouTube" },
+          ]}
+        />
+        <div class="space-y-1.5">
+          <label for="room_id_input" class="text-[12px] font-medium text-fg-secondary">
+            {selectedPlatform === "douyin"
+              ? "主播主页、分享链接或直播间链接"
+              : "直播间 ID 或链接"}
+          </label>
+          <input
+            id="room_id_input"
+            type="text"
+            bind:value={addRoom}
+            class="ui-input w-full"
+            placeholder={selectedPlatform === "douyin"
+              ? "请输入抖音主页、分享链接、sec_uid 或直播间链接"
+              : "请输入直播间 ID 或链接"}
           />
-
-          <div class="space-y-2">
-            <label
-              for="room_id"
-              class="block text-sm font-medium text-gray-700 dark:text-gray-300"
-            >
-              {selectedPlatform === "douyin"
-                ? "主播主页、分享链接或直播间链接"
-                : "直播间 ID 或链接"}
-            </label>
-            <input
-              id="room_id"
-              type="text"
-              bind:value={addRoom}
-              class="w-full px-3 py-2 bg-[#f5f5f7] dark:bg-[#1c1c1e] border-0 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-              placeholder={selectedPlatform === "douyin"
-                ? "请输入抖音主页、分享链接、sec_uid 或直播间链接"
-                : "请输入直播间 ID 或链接"}
-            />
-          </div>
-
-          <div class="flex justify-end space-x-3">
-            <button
-              class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600 rounded-lg transition-colors"
-              onclick={() => {
-                addModal = false;
-              }}
-            >
-              取消
-            </button>
-            <button
-              class="px-4 py-2 bg-[#0A84FF] hover:bg-[#0A84FF]/90 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={!addRoom}
-              onclick={() => {
-                addNewRecorder(addRoom, selectedPlatform);
-                addModal = false;
-                addRoom = "";
-              }}
-            >
-              添加
-            </button>
-          </div>
         </div>
+      </div>
+      <div class="ui-modal-footer">
+        <button
+          type="button"
+          class="ui-btn"
+          onclick={() => (addModal = false)}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          class="ui-btn ui-btn-primary"
+          disabled={!addRoom}
+          onclick={() => {
+            addNewRecorder(addRoom, selectedPlatform);
+          }}
+        >
+          确认添加
+        </button>
       </div>
     </div>
   </div>
 {/if}
 
+<!-- 历史录播归档弹窗 -->
 {#if archiveModal}
   <div
-    class="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center"
-    transition:fade={{ duration: 200 }}
+    class="ui-modal-backdrop"
+    role="presentation"
+    transition:fade={{ duration: 150 }}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) archiveModal = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === "Escape") archiveModal = false;
+    }}
   >
     <div
-      class="mac-modal archive-modal w-[900px] bg-white dark:bg-[#323234] rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh]"
+      class="ui-modal w-[900px] max-w-[95vw] h-[80vh]"
       transition:scale={{ duration: 150, start: 0.95 }}
     >
-      <!-- Header -->
-      <div
-        class="flex justify-between items-center px-6 py-4 border-b border-gray-200 dark:border-gray-700/50"
-      >
-        <div class="flex items-center space-x-3">
-          <h2 class="text-base font-medium text-gray-900 dark:text-white">
-            直播间记录
-          </h2>
-          <span class="text-sm text-gray-500 dark:text-gray-400">
-            {archiveRoom?.user_info.user_name} · {archiveRoom?.room_info
-              .room_id}
+      <div class="ui-modal-header">
+        <div class="flex items-center gap-2">
+          <span>直播间记录</span>
+          <span class="text-[12px] font-normal text-fg-muted">
+            {archiveRoom?.user_info.user_name} · #{archiveRoom?.room_info.room_id}
           </span>
         </div>
         <button
-          class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors"
+          type="button"
+          class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon"
           onclick={() => (archiveModal = false)}
         >
-          <X class="w-5 h-5 dark:icon-white" />
+          <X class="h-4 w-4" />
         </button>
       </div>
-
       <div
-        class="flex-1 overflow-auto custom-scrollbar-light"
-        onscroll={handleScroll}
+        class="ui-modal-body p-4 custom-scrollbar-light overflow-y-auto"
+        onscroll={handleArchiveScroll}
       >
-        <div class="p-6">
-          <div class="overflow-x-auto custom-scrollbar-light">
-            <table class="w-full">
-              <thead>
-                <tr class="border-b border-gray-200 dark:border-gray-700/50">
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >直播时间</th
-                  >
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >标题</th
-                  >
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >时长</th
-                  >
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >大小</th
-                  >
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >码率</th
-                  >
-                  <th
-                    class="px-4 py-3 text-left text-sm font-medium text-gray-500 dark:text-gray-400"
-                    >操作</th
-                  >
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-200 dark:divide-gray-700/50">
-                {#each archives as archive (archive.parent_id + ":" + archive.live_id)}
-                  <tr
-                    class="group hover:bg-[#f5f5f7] dark:hover:bg-[#3a3a3c] transition-colors"
-                  >
-                    <td class="px-4 py-3">
-                      <div class="flex flex-col">
-                        <span class="text-sm text-gray-900 dark:text-white"
-                          >{format_ts(archive.created_at).split(" ")[0]}</span
-                        >
-                        <span class="text-xs text-gray-500 dark:text-gray-400"
-                          >{format_ts(archive.created_at).split(" ")[1]}</span
-                        >
-                      </div>
-                    </td>
-                    <td class="px-4 py-3">
-                      <div class="flex items-center space-x-3">
-                        <img
-                          src={archive.cover}
-                          alt="cover"
-                          class="w-12 h-8 rounded object-cover"
-                        />
-                        <span class="text-sm text-gray-900 dark:text-white"
-                          >{archive.title}</span
-                        >
-                      </div>
-                    </td>
-                    <td class="px-4 py-3 text-sm text-gray-900 dark:text-white"
-                      >{format_duration(archive.length)}</td
+        <table class="w-full text-left text-[12px]">
+          <thead class="border-b border-line text-fg-muted font-medium">
+            <tr>
+              <th class="px-3 py-2.5">直播时间</th>
+              <th class="px-3 py-2.5">标题</th>
+              <th class="px-3 py-2.5">时长</th>
+              <th class="px-3 py-2.5">大小</th>
+              <th class="px-3 py-2.5">码率</th>
+              <th class="px-3 py-2.5 text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line">
+            {#each archives as archive (archive.parent_id + ":" + archive.live_id)}
+              <tr class="hover:bg-control-hover/40 transition-colors">
+                <td class="px-3 py-2.5 whitespace-nowrap">
+                  <div>{format_ts(archive.created_at).split(" ")[0]}</div>
+                  <div class="text-[11px] text-fg-faint">
+                    {format_ts(archive.created_at).split(" ")[1]}
+                  </div>
+                </td>
+                <td class="px-3 py-2.5">
+                  <div class="flex items-center gap-2.5">
+                    <img
+                      src={archive.cover}
+                      alt=""
+                      class="h-8 w-12 rounded object-cover border border-line bg-sunken shrink-0"
+                    />
+                    <span class="font-medium text-fg line-clamp-1">
+                      {archive.title}
+                    </span>
+                  </div>
+                </td>
+                <td class="px-3 py-2.5 whitespace-nowrap tabular-nums text-fg-secondary">
+                  {format_duration(archive.length)}
+                </td>
+                <td class="px-3 py-2.5 whitespace-nowrap tabular-nums text-fg-secondary">
+                  {formatSize(archive.size)}
+                </td>
+                <td class="px-3 py-2.5 whitespace-nowrap tabular-nums text-fg-muted">
+                  {calc_bitrate(archive.size, archive.length)} Kbps
+                </td>
+                <td class="px-3 py-2.5 text-right whitespace-nowrap">
+                  <div class="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon"
+                      title="预览录播"
+                      onclick={() => {
+                        invoke("open_live", {
+                          platform: archiveRoom?.room_info.platform,
+                          roomId: archiveRoom?.room_info.room_id,
+                          liveId: archive.live_id,
+                        });
+                      }}
                     >
-                    <td class="px-4 py-3 text-sm text-gray-900 dark:text-white"
-                      >{formatSize(archive.size)}</td
+                      <Play class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon"
+                      title="生成整场切片"
+                      onclick={() => openGenerateWholeClipModal(archive)}
                     >
-                    <td
-                      class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400"
-                      >{calc_bitrate(archive.size, archive.length)} Kbps</td
+                      <FileVideo class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      class="ui-btn ui-btn-ghost ui-btn-sm ui-btn-icon text-danger hover:bg-danger-soft"
+                      title="删除记录"
+                      onclick={() => {
+                        invoke("delete_archive", {
+                          platform: archiveRoom?.room_info.platform,
+                          roomId: archiveRoom?.room_info.room_id,
+                          liveId: archive.live_id,
+                        })
+                          .then(async () => {
+                            currentPage = 0;
+                            archives = [];
+                            hasMore = true;
+                            loadError = "";
+                            await updateArchives();
+                          })
+                          .catch((e) => alert(e));
+                      }}
                     >
-                    <td class="px-4 py-3">
-                      <div class="flex items-center space-x-2">
-                        <button
-                          class="p-1.5 rounded-lg hover:bg-blue-500/10 transition-colors"
-                          title="预览录播"
-                          onclick={() => {
-                            invoke("open_live", {
-                              platform: archiveRoom.room_info.platform,
-                              roomId: archiveRoom.room_info.room_id,
-                              liveId: archive.live_id,
-                            });
-                          }}
-                        >
-                          <PlayIcon class="w-4 h-4 icon-primary" />
-                        </button>
-                        <button
-                          class="p-1.5 rounded-lg hover:bg-blue-500/10 transition-colors"
-                          title="生成完整切片"
-                          onclick={() => {
-                            openGenerateWholeClipModal(archive);
-                          }}
-                        >
-                          <FileVideo class="w-4 h-4 icon-primary" />
-                        </button>
-                        <button
-                          class="p-1.5 rounded-lg hover:bg-red-500/10 transition-colors"
-                          title="删除记录"
-                          onclick={() => {
-                            invoke("delete_archive", {
-                              platform: archiveRoom.room_info.platform,
-                              roomId: archiveRoom.room_info.room_id,
-                              liveId: archive.live_id,
-                            })
-                              .then(async () => {
-                                // 删除后重新加载第一页数据
-                                currentPage = 0;
-                                archives = [];
-                                hasMore = true;
-                                loadError = "";
-                                await updateArchives();
-                              })
-                              .catch((e) => {
-                                alert(e);
-                              });
-                          }}
-                        >
-                          <Trash2 class="w-4 h-4 text-red-500" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
 
-          <!-- 加载更多区域 -->
-          <div class="mt-6 flex justify-center">
-            {#if loadError}
-              <div class="text-red-500 dark:text-red-400 text-sm mb-3">
-                {loadError}
-                <button
-                  class="ml-2 text-blue-500 hover:text-blue-600 underline"
-                  onclick={() => {
-                    loadError = "";
-                    loadMoreArchives();
-                  }}
-                >
-                  重试
-                </button>
-              </div>
-            {/if}
-
-            {#if isLoading && currentPage === 0}
-              <div
-                class="flex items-center space-x-2 text-gray-500 dark:text-gray-400"
+        <!-- 加载与空状态 -->
+        <div class="mt-4 flex justify-center py-2">
+          {#if loadError}
+            <div class="text-danger text-[12px]">
+              {loadError}
+              <button
+                type="button"
+                class="ml-2 text-accent-fg hover:underline cursor-pointer"
+                onclick={() => {
+                  loadError = "";
+                  loadMoreArchives();
+                }}
               >
-                <div
-                  class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500"
-                ></div>
-                <span>加载中...</span>
-              </div>
-            {:else if isLoading}
-              <div
-                class="flex items-center space-x-2 text-gray-500 dark:text-gray-400"
-              >
-                <div
-                  class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"
-                ></div>
-                <span>加载更多...</span>
-              </div>
-            {:else if archives.length === 0 && !isLoading}
-              <div class="text-gray-500 dark:text-gray-400 text-sm">
-                暂无录制记录
-              </div>
-            {/if}
-          </div>
+                重试
+              </button>
+            </div>
+          {:else if isLoading}
+            <div class="text-[12px] text-fg-muted flex items-center gap-2">
+              <div class="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent"></div>
+              <span>加载中...</span>
+            </div>
+          {:else if archives.length === 0}
+            <div class="text-[12px] text-fg-muted">暂无录制记录</div>
+          {/if}
         </div>
       </div>
     </div>
   </div>
 {/if}
 
-<!-- Generate Whole Clip Modal -->
-<GenerateWholeClipModal
-  bind:showModal={generateWholeClipModal}
-  archive={generateWholeClipArchive}
-  roomId={generateWholeClipArchive?.room_id || ""}
-  onGenerated={handleWholeClipGenerated}
-/>
+<!-- 整场切片弹窗 -->
+{#if generateWholeClipArchive}
+  <GenerateWholeClipModal
+    bind:showModal={generateWholeClipModal}
+    archive={generateWholeClipArchive}
+    roomId={generateWholeClipArchive.room_id}
+    onGenerated={handleWholeClipGenerated}
+  />
+{/if}
 
-<!-- 房间自动切片策略弹窗 -->
+<!-- 房间自动切片设置弹窗 -->
 {#if selectedAutomationRoom}
   <RoomAutomationDialog
     platform={selectedAutomationRoom.room_info.platform}
@@ -1384,70 +1368,10 @@
     open={showAutomationDialog}
     onClose={() => {
       showAutomationDialog = false;
+      // 保存后重新获取自动策略开关
+      if (selectedAutomationRoom) {
+        void updateAutoPolicies(summary.recorders);
+      }
     }}
   />
 {/if}
-
-<svelte:window onmousedown={handleModalClickOutside} />
-
-<style>
-  /* macOS style toggle switch */
-  .toggle-switch {
-    position: relative;
-    display: inline-block;
-    width: 36px;
-    height: 20px;
-  }
-
-  .toggle-switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .toggle-slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(120, 120, 128, 0.32);
-    transition: 0.2s;
-    border-radius: 20px;
-  }
-
-  .toggle-slider:before {
-    position: absolute;
-    content: "";
-    height: 16px;
-    width: 16px;
-    left: 2px;
-    bottom: 2px;
-    background-color: white;
-    transition: 0.2s;
-    border-radius: 50%;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  }
-
-  input:checked + .toggle-slider {
-    background-color: #34c759;
-  }
-
-  input:checked + .toggle-slider:before {
-    transform: translateX(16px);
-  }
-
-  @keyframes spin-slow {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .animate-spin-slow {
-    animation: spin-slow 3s linear infinite;
-  }
-</style>
