@@ -755,11 +755,11 @@
           </p>
         </div>
       {:else}
-        <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full">
+        <div class="overflow-hidden">
+          <table class="w-full table-fixed">
             <thead>
               <tr class="border-b border-line">
-                <th class="w-12 px-4 py-2.5 text-left">
+                <th class="w-10 px-3 py-2.5 text-left">
                   <input
                     type="checkbox"
                     checked={selectedArchives.size ===
@@ -768,34 +768,13 @@
                     class="ui-checkbox"
                   />
                 </th>
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >直播时间</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >直播间</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >标题</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >时长</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >大小</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >码率</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted"
-                  >操作</th
-                >
+                <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播时间</th>
+                <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
+                <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">标题</th>
+                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">时长</th>
+                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
+                <th class="w-24 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">码率</th>
+                <th class="w-48 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
@@ -803,7 +782,7 @@
                 {@const roomUrl = liveRoomUrl(archive.platform, archive.room_id)}
                 {@const dt = formatDateTimeParts(archive.created_at)}
                 <tr class="group transition-colors hover:bg-control-hover/50">
-                  <td class="px-4 py-2.5">
+                  <td class="w-10 px-3 py-2.5 align-top">
                     <input
                       type="checkbox"
                       checked={selectedArchives.has(archive.live_id)}
@@ -812,9 +791,9 @@
                     />
                   </td>
 
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <div class="flex flex-col">
-                      <span class="text-[13px] tabular-nums text-fg leading-tight"
+                      <span class="text-[12px] tabular-nums text-fg leading-tight"
                         >{dt.date}</span
                       >
                       <span class="text-[11px] tabular-nums text-fg-muted leading-tight"
@@ -823,47 +802,47 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-2 max-w-[200px]">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start gap-1.5 min-w-0">
                       {#if archive.platform === "bilibili"}
-                        <BilibiliIcon class="w-4 h-4 flex-shrink-0" />
+                        <BilibiliIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "douyin"}
-                        <DouyinIcon class="w-4 h-4 flex-shrink-0" />
+                        <DouyinIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "douyu"}
-                        <DouyuIcon class="w-4 h-4 flex-shrink-0" />
+                        <DouyuIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "kuaishou"}
-                        <KuaishouIcon class="w-4 h-4 flex-shrink-0" />
+                        <KuaishouIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "huya"}
-                        <HuyaIcon class="w-4 h-4 flex-shrink-0" />
+                        <HuyaIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "tiktok"}
-                        <TikTokIcon class="w-5 h-5 flex-shrink-0" />
+                        <TikTokIcon class="w-5 h-5 flex-shrink-0 mt-0.5" />
                       {:else if archive.platform === "twitch"}
-                        <TwitchIcon class="w-5 h-5 flex-shrink-0 text-purple-600" />
+                        <TwitchIcon class="w-5 h-5 flex-shrink-0 text-purple-600 mt-0.5" />
                       {:else if archive.platform === "youtube"}
-                        <YouTubeIcon class="w-4 h-4 flex-shrink-0" />
+                        <YouTubeIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                       {:else}
-                        <Globe class="h-4 w-4 flex-shrink-0 text-fg-faint" />
+                        <Globe class="h-4 w-4 flex-shrink-0 text-fg-faint mt-0.5" />
                       {/if}
                       {#if roomUrl}
                         <a
                           href={roomUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="truncate text-[13px] text-accent-fg underline-offset-2 hover:underline min-w-0"
+                          class="break-all text-[12px] text-accent-fg underline-offset-2 hover:underline leading-tight min-w-0"
                           title={`打开 ${platformLabel(archive.platform)} 直播间: ${archive.room_id}`}
                         >
                           {archive.room_id}
                         </a>
                       {:else}
-                        <span class="truncate text-[13px] text-fg min-w-0" title={archive.room_id}
+                        <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={archive.room_id}
                           >{archive.room_id}</span
                         >
                       {/if}
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-3">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start gap-3">
                       {#if archive.cover}
                         <img
                           src={archive.cover}
@@ -872,39 +851,39 @@
                         />
                       {/if}
                       <span
-                        class="line-clamp-2 break-all text-[13px] text-fg leading-snug"
+                        class="break-all text-[13px] text-fg leading-snug"
                         title={archive.title}
                         >{archive.title}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <div class="flex items-center gap-1.5">
-                      <Clock class="h-3.5 w-3.5 text-fg-faint" />
-                      <span class="text-[13px] tabular-nums text-fg"
+                      <Clock class="h-3.5 w-3.5 text-fg-faint shrink-0" />
+                      <span class="text-[12px] tabular-nums text-fg"
                         >{formatTimecode(archive.length, 0)}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <div class="flex items-center gap-1.5">
-                      <HardDrive class="h-3.5 w-3.5 text-fg-faint" />
-                      <span class="text-[13px] tabular-nums text-fg"
+                      <HardDrive class="h-3.5 w-3.5 text-fg-faint shrink-0" />
+                      <span class="text-[12px] tabular-nums text-fg"
                         >{formatSize(archive.size)}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <span class="text-[12px] tabular-nums text-fg-muted"
                       >{calcBitrate(archive.size, archive.length)} Kbps</span
                     >
                   </td>
 
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-1">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-center gap-1 flex-wrap">
                       <button
                         class="rounded-[7px] p-1.5 transition-colors hover:bg-accent-soft"
                         title="预览录播"

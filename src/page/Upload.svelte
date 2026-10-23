@@ -280,15 +280,15 @@
           </p>
         </div>
       {:else}
-        <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full">
+        <div class="overflow-hidden">
+          <table class="w-full table-fixed">
             <thead>
               <tr class="border-b border-line bg-control/60">
-                <th class="min-w-[260px] px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
-                <th class="w-44 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">状态</th>
-                <th class="w-32 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">账号</th>
-                <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">更新时间</th>
-                <th class="w-28 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
+                <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
+                <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">状态</th>
+                <th class="w-28 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">账号</th>
+                <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">更新时间</th>
+                <th class="w-24 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
@@ -298,7 +298,7 @@
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-4 py-2.5">
                     <button
-                      class="flex w-full items-center gap-3 text-left"
+                      class="flex w-full items-start gap-3 text-left"
                       title={editable ? "编辑投稿" : "查看投稿"}
                       onclick={() => (editingId = upload.id)}
                     >
@@ -310,10 +310,10 @@
                         {/if}
                       </div>
                       <div class="min-w-0 flex-1">
-                        <p class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug" title={upload.title}>{upload.title}</p>
+                        <p class="break-all text-[12px] font-medium text-fg leading-snug" title={upload.title}>{upload.title}</p>
                         <p class="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-muted">
                           <span class="ui-badge shrink-0">{sourceLabels[upload.source]}</span>
-                          <span class="truncate" title={upload.source_title}>
+                          <span class="break-all leading-tight" title={upload.source_title}>
                             {upload.source_title || "来源已删除"}
                           </span>
                         </p>
@@ -333,12 +333,12 @@
                           href={`https://www.bilibili.com/video/${upload.bvid}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="truncate text-accent-fg hover:underline"
+                          class="break-all text-accent-fg hover:underline leading-tight"
                         >
                           {upload.bvid}
                         </a>
                       {:else if upload.status === "failed"}
-                        <span class="max-w-full truncate text-danger-fg" title={upload.message}>{upload.message}</span>
+                        <span class="max-w-full break-all text-danger-fg leading-tight" title={upload.message}>{upload.message}</span>
                       {:else if editable && upload.source_state === "render"}
                         <span class="text-fg-faint">投稿时生成视频</span>
                       {:else if upload.source_state === "missing"}
@@ -347,13 +347,13 @@
                     </div>
                   </td>
                   <td class="px-4 py-2.5">
-                    <span class="block truncate text-[12px] {upload.uid ? 'text-fg-secondary' : 'text-fg-faint'}">
+                    <span class="block break-all text-[12px] leading-tight {upload.uid ? 'text-fg-secondary' : 'text-fg-faint'}">
                       {upload.uid ? (accountNames.get(upload.uid) ?? upload.uid) : "未选择"}
                     </span>
                   </td>
                   <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-2 text-[12px] text-fg-secondary">
-                      <Calendar class="h-3.5 w-3.5 shrink-0 text-fg-faint" />
+                    <div class="flex items-start gap-1.5 text-fg-secondary">
+                      <Calendar class="h-3.5 w-3.5 shrink-0 text-fg-faint mt-0.5" />
                       <div class="flex flex-col min-w-0">
                         <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
                         <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>

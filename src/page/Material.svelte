@@ -661,11 +661,11 @@
           </p>
         </div>
       {:else}
-        <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full">
+        <div class="overflow-hidden">
+          <table class="w-full table-fixed">
             <thead>
               <tr class="border-b border-line bg-control/60">
-                <th class="w-12 px-4 py-2.5 text-left">
+                <th class="w-10 px-3 py-2.5 text-left">
                   <input
                     type="checkbox"
                     checked={selectedVideos.size === filteredVideos.length &&
@@ -674,34 +674,13 @@
                     class="ui-checkbox"
                   />
                 </th>
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-36"
-                  >直播间</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted min-w-[260px]"
-                  >素材</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-20"
-                  >备注</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-24"
-                  >时长</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-24"
-                  >大小</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-36"
-                  >创建时间</th
-                >
-                <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-52"
-                  >操作</th
-                >
+                <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
+                <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">素材</th>
+                <th class="w-16 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">备注</th>
+                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">时长</th>
+                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
+                <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">创建时间</th>
+                <th class="w-48 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
@@ -714,7 +693,7 @@
                     ? 'bg-accent-soft/40'
                     : ''}"
                 >
-                  <td class="w-12 px-4 py-2.5">
+                  <td class="w-10 px-3 py-2.5 align-top">
                     <input
                       type="checkbox"
                       checked={selectedVideos.has(video.id)}
@@ -723,58 +702,58 @@
                     />
                   </td>
 
-                  <td class="px-4 py-2.5 w-36 overflow-hidden">
-                    <div class="flex items-center space-x-2 min-w-0 w-full">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start space-x-1.5 min-w-0">
                       {#if video.platform === "imported"}
-                        <FileVideo class="table-icon text-fg-faint flex-shrink-0" />
-                        <span class="truncate text-[12px] text-fg-secondary" title="外部视频"
+                        <FileVideo class="table-icon text-fg-faint flex-shrink-0 mt-0.5" />
+                        <span class="break-all text-[12px] text-fg-secondary leading-tight" title="外部视频"
                           >外部视频</span
                         >
                       {:else if video.platform === "clip"}
-                        <Scissors class="table-icon text-fg-faint flex-shrink-0" />
-                        <span class="truncate text-[12px] text-fg-secondary" title="视频切片"
+                        <Scissors class="table-icon text-fg-faint flex-shrink-0 mt-0.5" />
+                        <span class="break-all text-[12px] text-fg-secondary leading-tight" title="视频切片"
                           >视频切片</span
                         >
                       {:else}
                         {@const roomUrl = liveRoomUrl(video.platform, video.room_id)}
                         {#if video.platform === "bilibili"}
-                          <BilibiliIcon class="w-4 h-4 flex-shrink-0" />
+                          <BilibiliIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "douyin"}
-                          <DouyinIcon class="w-4 h-4 flex-shrink-0" />
+                          <DouyinIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "douyu"}
-                          <DouyuIcon class="w-4 h-4 flex-shrink-0" />
+                          <DouyuIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "kuaishou"}
-                          <KuaishouIcon class="w-4 h-4 flex-shrink-0" />
+                          <KuaishouIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "huya"}
-                          <HuyaIcon class="w-4 h-4 flex-shrink-0" />
+                          <HuyaIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "tiktok"}
-                          <TikTokIcon class="w-5 h-5 flex-shrink-0" />
+                          <TikTokIcon class="w-5 h-5 flex-shrink-0 mt-0.5" />
                         {:else if video.platform === "twitch"}
-                          <TwitchIcon class="w-5 h-5 flex-shrink-0 text-purple-600" />
+                          <TwitchIcon class="w-5 h-5 flex-shrink-0 text-purple-600 mt-0.5" />
                         {:else if video.platform === "youtube"}
-                          <YouTubeIcon class="w-4 h-4 flex-shrink-0" />
+                          <YouTubeIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
                         {:else}
-                          <Globe class="table-icon text-fg-faint flex-shrink-0" />
+                          <Globe class="table-icon text-fg-faint flex-shrink-0 mt-0.5" />
                         {/if}
                         {#if roomUrl}
                           <a
                             href={roomUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            class="truncate text-[12px] text-accent-fg hover:underline min-w-0"
+                            class="break-all text-[12px] text-accent-fg hover:underline leading-tight min-w-0"
                             title={`打开 ${platformLabel(video.platform)} 直播间: ${video.room_id}`}
                           >
                             {video.room_id}
                           </a>
                         {:else}
-                          <span class="truncate text-[12px] text-fg min-w-0" title={video.room_id}>{video.room_id}</span>
+                          <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={video.room_id}>{video.room_id}</span>
                         {/if}
                       {/if}
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 min-w-[260px]">
-                    <div class="flex items-center space-x-3 w-full min-w-0">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start space-x-3 w-full min-w-0">
                       <div
                         class="flex h-10 w-16 flex-shrink-0 items-center justify-center overflow-hidden rounded-[6px] border border-line bg-sunken"
                       >
@@ -804,13 +783,13 @@
                       </div>
                       <div class="min-w-0 flex-1">
                         <p
-                          class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug"
+                          class="break-all text-[12px] font-medium text-fg leading-snug"
                           title={video.title || video.file}
                         >
                           {video.title || video.file}
                         </p>
                         <p
-                          class="w-full truncate text-[11px] text-fg-muted"
+                          class="break-all text-[11px] text-fg-muted leading-tight mt-1"
                           title={video.file}
                         >
                           {video.file}
@@ -819,36 +798,36 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-20 overflow-hidden">
-                    <div class="flex items-center space-x-2 min-w-0">
-                      <AnnotationOutline class="table-icon text-fg-faint flex-shrink-0" />
-                      <span class="truncate text-[12px] text-fg-secondary" title={video.note || ""}
-                        >{video.note}</span
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start space-x-1.5 min-w-0">
+                      <AnnotationOutline class="table-icon text-fg-faint flex-shrink-0 mt-0.5" />
+                      <span class="break-all text-[12px] text-fg-secondary leading-tight" title={video.note || ""}
+                        >{video.note || ""}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-24">
-                    <div class="flex items-center space-x-2">
-                      <Clock class="table-icon text-fg-faint" />
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-center space-x-1.5">
+                      <Clock class="table-icon text-fg-faint shrink-0" />
                       <span class="text-[12px] tabular-nums text-fg-secondary"
                         >{formatTimecode(video.duration || video.length, 0)}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-24">
-                    <div class="flex items-center space-x-2">
-                      <HardDrive class="table-icon text-fg-faint" />
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-center space-x-1.5">
+                      <HardDrive class="table-icon text-fg-faint shrink-0" />
                       <span class="text-[12px] tabular-nums text-fg-secondary"
                         >{formatSize(video.size)}</span
                       >
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-36">
-                    <div class="flex items-center space-x-2">
-                      <Calendar class="table-icon text-fg-faint shrink-0" />
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start space-x-2">
+                      <Calendar class="table-icon text-fg-faint shrink-0 mt-0.5" />
                       <div class="flex flex-col min-w-0">
                         <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
                         <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>
@@ -856,8 +835,8 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-52">
-                    <div class="flex items-center gap-1">
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-center gap-1 flex-wrap">
                       <button
                         class="action-button hover:bg-accent-soft"
                         title="预览"

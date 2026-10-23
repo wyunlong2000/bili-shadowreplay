@@ -257,25 +257,25 @@
           </p>
         </div>
       {:else}
-        <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full">
+        <div class="overflow-hidden">
+          <table class="w-full table-fixed">
             <thead>
               <tr class="border-b border-line bg-control/60">
-                <th class="min-w-[260px] px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">切片</th>
-                <th class="w-28 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
-                <th class="w-32 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">内容</th>
-                <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
-                <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">最近编辑</th>
-                <th class="w-40 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
+                <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">切片</th>
+                <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
+                <th class="w-28 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">内容</th>
+                <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
+                <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">最近编辑</th>
+                <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
               {#each filtered as project (project.id)}
                 {@const dt = formatDateTimeParts(project.updated_at)}
                 <tr class="group transition-colors hover:bg-control-hover/50">
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <button
-                      class="flex w-full items-center gap-3 text-left"
+                      class="flex w-full items-start gap-3 text-left"
                       title="编辑切片"
                       onclick={() => openProject(project.id)}
                     >
@@ -287,52 +287,52 @@
                         {/if}
                       </div>
                       <div class="min-w-0 flex-1">
-                        <p class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug" title={project.title}>
+                        <p class="break-all text-[12px] font-medium text-fg leading-snug" title={project.title}>
                           {project.title || "未命名切片"}
                         </p>
-                        <p class="truncate text-[11px] text-fg-muted" title={project.note}>
+                        <p class="break-all text-[11px] text-fg-muted leading-tight mt-1" title={project.note}>
                           {project.note || "无备注"}
                         </p>
                       </div>
                     </button>
                   </td>
-                  <td class="px-4 py-2.5">
-                    <span class="block truncate text-[12px] text-fg-secondary" title={project.room_id || "—"}>
+                  <td class="px-3 py-2.5 align-top">
+                    <span class="block break-all text-[12px] text-fg-secondary leading-tight" title={project.room_id || "—"}>
                       {project.room_id || "—"}
                     </span>
                   </td>
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-2 text-[12px] text-fg-secondary">
-                      <Clock class="table-icon text-fg-faint" />
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-center gap-1.5 text-[12px] text-fg-secondary">
+                      <Clock class="table-icon text-fg-faint shrink-0" />
                       <span class="tabular-nums">{formatTimecode(project.duration, 0)}</span>
                       <span class="text-fg-faint">· {project.clip_count} 段</span>
                     </div>
                   </td>
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     {#if project.bvid}
                       <a
                         href={`https://www.bilibili.com/video/${project.bvid}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        class="inline-flex items-center gap-1 truncate text-[12px] text-accent-fg hover:underline"
+                        class="inline-flex items-center gap-1 break-all text-[12px] text-accent-fg hover:underline leading-tight"
                       >
-                        <Upload class="h-3 w-3" />
+                        <Upload class="h-3 w-3 shrink-0" />
                         {project.bvid}
                       </a>
                     {:else}
                       <span class="text-[12px] text-fg-faint">未投稿</span>
                     {/if}
                   </td>
-                  <td class="px-4 py-2.5 w-36">
-                    <div class="flex items-center gap-2 text-fg-secondary">
-                      <Calendar class="table-icon text-fg-faint shrink-0" />
+                  <td class="px-3 py-2.5 align-top">
+                    <div class="flex items-start gap-1.5 text-fg-secondary">
+                      <Calendar class="table-icon text-fg-faint shrink-0 mt-0.5" />
                       <div class="flex flex-col min-w-0">
                         <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
                         <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>
                       </div>
                     </div>
                   </td>
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5 align-top">
                     <div class="flex items-center gap-1">
                       <button
                         class="action-button hover:bg-accent-soft"
