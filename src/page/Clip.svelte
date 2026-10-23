@@ -296,7 +296,9 @@
                     </button>
                   </td>
                   <td class="px-4 py-2.5">
-                    <span class="truncate text-[12px] text-fg-secondary">{project.room_id || "—"}</span>
+                    <span class="block truncate text-[12px] text-fg-secondary" title={project.room_id || "—"}>
+                      {project.room_id || "—"}
+                    </span>
                   </td>
                   <td class="px-4 py-2.5">
                     <div class="flex items-center gap-2 text-[12px] text-fg-secondary">

@@ -24,6 +24,7 @@
     History,
     Sparkles,
     Loader2,
+    Scissors,
   } from "lucide-svelte";
   import BilibiliIcon from "../lib/components/BilibiliIcon.svelte";
   import DouyinIcon from "../lib/components/DouyinIcon.svelte";
@@ -36,6 +37,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import GenerateWholeClipModal from "../lib/components/GenerateWholeClipModal.svelte";
   import ArchiveSummaryModal from "../lib/components/ArchiveSummaryModal.svelte";
+  import RunAutomationDialog from "../lib/components/automation/RunAutomationDialog.svelte";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
   import type { RecorderInfo, RecorderList } from "src/lib/interface";
 
@@ -62,6 +64,10 @@
   let showSummaryModal = $state(false);
   let summaryArchive: RecordItem | null = $state(null);
   let summaryStatuses: Record<string, RecordSummaryStatus> = $state({});
+
+  // 智能高光切片分析相关状态
+  let showAutomationModal = $state(false);
+  let automationArchive: RecordItem | null = $state(null);
 
   // 分页相关状态
   let currentPage = $state(1);
@@ -500,6 +506,12 @@
     showSummaryModal = true;
   }
 
+  /** 打开智能高光切片分析弹窗 */
+  function openAutomationModal(archive: RecordItem) {
+    automationArchive = archive;
+    showAutomationModal = true;
+  }
+
   function handleWholeClipGenerated() {
     // 生成完成后可以刷新列表或显示通知
     console.log("完整录播生成已开始");
@@ -905,6 +917,13 @@
                         <FileVideo class="h-4 w-4 text-accent-fg" />
                       </button>
                       <button
+                        class="rounded-[7px] p-1.5 transition-colors hover:bg-accent-soft"
+                        title="智能高光切片"
+                        onclick={() => openAutomationModal(archive)}
+                      >
+                        <Scissors class="h-4 w-4 text-accent-fg" />
+                      </button>
+                      <button
                         class="rounded-[7px] p-1.5 transition-colors {summaryButtonClass(archive)}"
                         title={summaryButtonTitle(archive)}
                         onclick={() => openSummaryModal(archive)}
@@ -993,6 +1012,19 @@
   bind:showModal={showSummaryModal}
   archive={summaryArchive}
   onUpdated={updateSummaryStatus}
+/>
+
+<!-- 智能高光切片分析弹窗 -->
+<RunAutomationDialog
+  open={showAutomationModal}
+  archive={automationArchive}
+  onClose={() => {
+    showAutomationModal = false;
+    automationArchive = null;
+  }}
+  onSuccess={(runId) => {
+    console.log("智能高光切片分析已发起:", runId);
+  }}
 />
 
 <style>
