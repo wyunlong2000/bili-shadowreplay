@@ -488,6 +488,7 @@ impl HlsRecorder {
             tokio::time::sleep(UPDATE_INTERVAL).await;
         }
 
+        let _ = self.playlist.lock().await.close().await;
         Ok(())
     }
 

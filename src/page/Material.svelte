@@ -675,7 +675,7 @@
                   />
                 </th>
                 <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-28"
+                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-36"
                   >直播间</th
                 >
                 <th
@@ -722,16 +722,16 @@
                     />
                   </td>
 
-                  <td class="px-4 py-2.5 w-28">
-                    <div class="flex items-center space-x-2">
+                  <td class="px-4 py-2.5 w-36 overflow-hidden">
+                    <div class="flex items-center space-x-2 min-w-0 w-full">
                       {#if video.platform === "imported"}
-                        <FileVideo class="table-icon text-fg-faint" />
-                        <span class="text-[12px] text-fg-secondary"
+                        <FileVideo class="table-icon text-fg-faint flex-shrink-0" />
+                        <span class="truncate text-[12px] text-fg-secondary" title="外部视频"
                           >外部视频</span
                         >
                       {:else if video.platform === "clip"}
-                        <Scissors class="table-icon text-fg-faint" />
-                        <span class="text-[12px] text-fg-secondary"
+                        <Scissors class="table-icon text-fg-faint flex-shrink-0" />
+                        <span class="truncate text-[12px] text-fg-secondary" title="视频切片"
                           >视频切片</span
                         >
                       {:else}
@@ -753,27 +753,27 @@
                         {:else if video.platform === "youtube"}
                           <YouTubeIcon class="w-4 h-4 flex-shrink-0" />
                         {:else}
-                          <Globe class="table-icon text-fg-faint" />
+                          <Globe class="table-icon text-fg-faint flex-shrink-0" />
                         {/if}
                         {#if roomUrl}
                           <a
                             href={roomUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            class="text-[12px] text-accent-fg hover:underline"
-                            title={`打开 ${platformLabel(video.platform)} 直播间`}
+                            class="truncate text-[12px] text-accent-fg hover:underline min-w-0"
+                            title={`打开 ${platformLabel(video.platform)} 直播间: ${video.room_id}`}
                           >
                             {video.room_id}
                           </a>
                         {:else}
-                          <span class="text-[12px] text-fg">{video.room_id}</span>
+                          <span class="truncate text-[12px] text-fg min-w-0" title={video.room_id}>{video.room_id}</span>
                         {/if}
                       {/if}
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-64">
-                    <div class="flex items-center space-x-3 w-full">
+                  <td class="px-4 py-2.5 w-64 overflow-hidden">
+                    <div class="flex items-center space-x-3 w-full min-w-0">
                       <div
                         class="flex h-8 w-12 flex-shrink-0 items-center justify-center overflow-hidden rounded-[6px] border border-line bg-sunken"
                       >
@@ -801,7 +801,7 @@
                           </svg>
                         {/if}
                       </div>
-                      <div class="min-w-0 flex-1 w-64">
+                      <div class="min-w-0 flex-1">
                         <p
                           class="w-full truncate text-[12px] font-medium text-fg"
                           title={video.title || video.file}
@@ -818,10 +818,10 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-20">
-                    <div class="flex items-center space-x-2">
-                      <AnnotationOutline class="table-icon text-fg-faint" />
-                      <span class="truncate text-[12px] text-fg-secondary"
+                  <td class="px-4 py-2.5 w-20 overflow-hidden">
+                    <div class="flex items-center space-x-2 min-w-0">
+                      <AnnotationOutline class="table-icon text-fg-faint flex-shrink-0" />
+                      <span class="truncate text-[12px] text-fg-secondary" title={video.note || ""}
                         >{video.note}</span
                       >
                     </div>

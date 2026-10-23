@@ -823,38 +823,38 @@
                   </td>
 
                   <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-2 max-w-[200px]">
                       {#if archive.platform === "bilibili"}
-                        <BilibiliIcon class="w-4 h-4" />
+                        <BilibiliIcon class="w-4 h-4 flex-shrink-0" />
                       {:else if archive.platform === "douyin"}
-                        <DouyinIcon class="w-4 h-4" />
+                        <DouyinIcon class="w-4 h-4 flex-shrink-0" />
                       {:else if archive.platform === "douyu"}
-                        <DouyuIcon class="w-4 h-4" />
+                        <DouyuIcon class="w-4 h-4 flex-shrink-0" />
                       {:else if archive.platform === "kuaishou"}
-                        <KuaishouIcon class="w-4 h-4" />
+                        <KuaishouIcon class="w-4 h-4 flex-shrink-0" />
                       {:else if archive.platform === "huya"}
-                        <HuyaIcon class="w-4 h-4" />
+                        <HuyaIcon class="w-4 h-4 flex-shrink-0" />
                       {:else if archive.platform === "tiktok"}
-                        <TikTokIcon class="w-5 h-5" />
+                        <TikTokIcon class="w-5 h-5 flex-shrink-0" />
                       {:else if archive.platform === "twitch"}
-                        <TwitchIcon class="w-5 h-5 text-purple-600" />
+                        <TwitchIcon class="w-5 h-5 flex-shrink-0 text-purple-600" />
                       {:else if archive.platform === "youtube"}
-                        <YouTubeIcon class="w-4 h-4" />
+                        <YouTubeIcon class="w-4 h-4 flex-shrink-0" />
                       {:else}
-                        <Globe class="h-4 w-4 text-fg-faint" />
+                        <Globe class="h-4 w-4 flex-shrink-0 text-fg-faint" />
                       {/if}
                       {#if roomUrl}
                         <a
                           href={roomUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="text-[13px] text-accent-fg underline-offset-2 hover:underline"
-                          title={`打开 ${platformLabel(archive.platform)} 直播间`}
+                          class="truncate text-[13px] text-accent-fg underline-offset-2 hover:underline min-w-0"
+                          title={`打开 ${platformLabel(archive.platform)} 直播间: ${archive.room_id}`}
                         >
                           {archive.room_id}
                         </a>
                       {:else}
-                        <span class="text-[13px] text-fg"
+                        <span class="truncate text-[13px] text-fg min-w-0" title={archive.room_id}
                           >{archive.room_id}</span
                         >
                       {/if}
