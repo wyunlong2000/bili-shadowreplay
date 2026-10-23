@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ShadowReplay 全页面交互原型，使用本地示例数据演示完整工作流。">
+  <title>ShadowReplay 界面原型</title>
+  <link rel="icon" type="image/svg+xml" href="./assets/icon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./assets/icons.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<div id="shadowreplay-design" aria-label="ShadowReplay 界面细节优化设计">
+  <div class="sr-window">
+    <aside class="sr-sidebar" aria-label="主导航">
+      <div class="sr-brand">
+        <button type="button" class="sr-quiet sr-collapse-btn" id="sr-sidebar-toggle" aria-label="收起或展开侧边栏" title="收起 / 展开侧边栏">
+          <i data-lucide="panel-left" aria-hidden="true"></i>
+        </button>
+        <span class="sr-brand-mark"><img alt="" src="./assets/icon.svg"></span>
+        <span class="sr-brand-name">ShadowReplay</span>
+      </div>
+      <nav class="sr-nav" aria-label="录制管理">
+        <div class="sr-nav-title">录制管理</div>
+        <button type="button" data-page="summary" aria-current="page" aria-label="总览"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span class="sr-nav-label">总览</span></button>
+        <button type="button" data-page="rooms" aria-label="直播间"><i data-lucide="video" aria-hidden="true"></i><span class="sr-nav-label">直播间</span><span class="sr-nav-count" id="sr-nav-room-count">5</span></button>
+        <button type="button" data-page="archives" aria-label="录播"><i data-lucide="history" aria-hidden="true"></i><span class="sr-nav-label">录播</span><span class="sr-nav-count" id="sr-nav-archive-count">5</span></button>
+      </nav>
+      <nav class="sr-nav" aria-label="内容创作">
+        <div class="sr-nav-title">内容创作</div>
+        <button type="button" data-page="materials" aria-label="素材"><i data-lucide="film" aria-hidden="true"></i><span class="sr-nav-label">素材</span><span class="sr-nav-count" id="sr-nav-material-count">4</span></button>
+        <button type="button" data-page="clips" aria-label="切片"><i data-lucide="clapperboard" aria-hidden="true"></i><span class="sr-nav-label">切片</span><span class="sr-nav-count" id="sr-nav-clip-count">3</span></button>
+        <button type="button" data-page="uploads" aria-label="投稿"><i data-lucide="upload" aria-hidden="true"></i><span class="sr-nav-label">投稿</span></button>
+      </nav>
+      <nav class="sr-nav" aria-label="工具">
+        <div class="sr-nav-title">工具</div>
+        <button type="button" data-page="tasks" aria-label="任务"><i data-lucide="list-checks" aria-hidden="true"></i><span class="sr-nav-label">任务</span><span class="sr-nav-count" id="sr-nav-task-count">2</span></button>
+        <button type="button" data-page="ai" aria-label="助手"><i data-lucide="brain" aria-hidden="true"></i><span class="sr-nav-label">助手</span></button>
+      </nav>
+      <nav class="sr-nav sr-nav-tail" aria-label="应用管理">
+        <button type="button" data-page="accounts" aria-label="账号"><i data-lucide="users" aria-hidden="true"></i><span class="sr-nav-label">账号</span><span class="sr-nav-count" id="sr-nav-account-count">2</span></button>
+        <button type="button" data-page="settings" aria-label="设置"><i data-lucide="settings" aria-hidden="true"></i><span class="sr-nav-label">设置</span></button>
+        <button type="button" data-page="about" aria-label="关于"><i data-lucide="info" aria-hidden="true"></i><span class="sr-nav-label">关于</span></button>
+      </nav>
+    </aside>
+
+    <div class="sr-main">
+      <header class="sr-topbar">
+        <div class="sr-location"><span>工作区</span><i data-lucide="chevron-right" aria-hidden="true"></i><strong id="sr-current-page">总览</strong></div>
+        <div class="sr-top-actions">
+          <button type="button" class="sr-quiet" id="sr-density" aria-label="切换信息密度" title="切换舒适 / 紧凑视图"><span id="sr-density-label">舒适视图</span></button>
+          <button type="button" class="sr-quiet" id="sr-theme" aria-label="切换主题" title="切换深浅主题"><i data-lucide="sun-moon" aria-hidden="true"></i></button>
+          <button type="button" class="sr-quiet sr-task-trigger" id="sr-task-popover-btn" aria-label="展开任务中心" aria-expanded="false">
+            <i data-lucide="list-checks" aria-hidden="true"></i>
+            <span>任务</span>
+            <span class="sr-badge-pill" id="sr-running-task-badge">2</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 顶部任务中心浮层 -->
+      <aside class="sr-task-popover" id="sr-task-popover" aria-label="进行中的任务" hidden>
+        <div class="sr-section-head">
+          <h2>进行中的任务</h2>
+          <button type="button" class="sr-text-button" data-page="tasks">查看全部</button>
+        </div>
+        <div class="sr-popover-list" id="sr-popover-task-list"></div>
+      </aside>
+
+      <!-- 1. 总览页 -->
+      <section class="sr-page" id="sr-summary" aria-label="总览页面">
+        <div class="sr-heading">
+          <div>
+            <h1>总览</h1>
+            <p class="sr-subtitle">掌握录制状态，继续处理最近的内容。</p>
+          </div>
+          <button type="button" class="sr-button sr-button-primary" data-add><i data-lucide="plus" aria-hidden="true"></i>添加直播间</button>
+        </div>
+        <div class="sr-stats" aria-label="录制概况">
+          <div class="sr-stat">
+            <div class="sr-label">直播间</div>
+            <div class="sr-stat-number"><span id="sr-stat-online">2</span> <small>/ <span id="sr-stat-total">5</span> 个在线</small></div>
+            <div class="sr-caption sr-live"><span class="sr-dot"></span> <span id="sr-stat-recording-text">正在缓存 2 个直播间</span></div>
+          </div>
+          <div class="sr-stat">
+            <div class="sr-label">总缓存时长</div>
+            <div class="sr-stat-number">126 <small>小时</small></div>
+            <div class="sr-caption">累计录制时长</div>
+          </div>
+          <div class="sr-stat">
+            <div class="sr-label">今日录播</div>
+            <div class="sr-stat-number"><span id="sr-stat-today-records">5</span> <small>场</small></div>
+            <div class="sr-caption">按录制开始时间统计</div>
+          </div>
+        </div>
+        <div class="sr-columns">
+          <div>
+            <div class="sr-section-head">
+              <h2>最近录播</h2>
+              <div class="sr-inline">
+                <button type="button" class="sr-text-button" data-page="archives">全部录播</button>
+                <button type="button" class="sr-quiet" id="sr-refresh" aria-label="刷新最近录播" title="刷新列表"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+              </div>
+            </div>
+            <div class="sr-records" id="sr-record-list"></div>
+            <div class="sr-section-head" style="margin-top: 22px">
+              <h2>直播中的房间</h2>
+              <button type="button" class="sr-text-button" data-page="rooms">查看全部</button>
+            </div>
+            <div class="sr-room-summary" id="sr-live-room-summary"></div>
+          </div>
+          <aside class="sr-storage" aria-label="存储与账号">
+            <div class="sr-inline"><i data-lucide="hard-drive" aria-hidden="true"></i><h2>存储空间</h2></div>
+            <div class="sr-storage-number">82.4 GB</div>
+            <div class="sr-caption">录播缓存占用</div>
+            <div class="sr-meter" role="meter" aria-label="磁盘已使用" aria-valuenow="41" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+            <div class="sr-storage-row"><span>磁盘已使用 41%</span></div>
+            <div class="sr-storage-row"><span>剩余空间</span><span>592 GB</span></div>
+            <button type="button" class="sr-account sr-account-link" data-page="accounts">
+              <i data-lucide="users" aria-hidden="true"></i>
+              <span>已连接 <strong id="sr-summary-account-count">2</strong> 个账号</span>
+              <i data-lucide="chevron-right" aria-hidden="true" style="margin-left: auto"></i>
+            </button>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 2. 直播间页 -->
+      <section class="sr-page" id="sr-rooms" aria-label="直播间页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>直播间</h1>
+            <p class="sr-subtitle" id="sr-rooms-subtitle"></p>
+          </div>
+          <button type="button" class="sr-button sr-button-primary" data-add><i data-lucide="plus" aria-hidden="true"></i>添加直播间</button>
+        </div>
+        <div class="sr-toolbar">
+          <div class="sr-platforms" aria-label="平台筛选">
+            <button type="button" data-platform="全部" aria-pressed="true">全部平台</button>
+            <button type="button" data-platform="B 站" aria-pressed="false">B 站</button>
+            <button type="button" data-platform="抖音" aria-pressed="false">抖音</button>
+            <button type="button" data-platform="虎牙" aria-pressed="false">虎牙</button>
+            <button type="button" data-platform="斗鱼" aria-pressed="false">斗鱼</button>
+          </div>
+          <label class="sr-search">
+            <i data-lucide="search" aria-hidden="true"></i>
+            <input id="sr-search" type="search" placeholder="搜索主播、标题或房间号" aria-label="搜索主播、标题或房间号">
+          </label>
+        </div>
+        <div class="sr-room-grid" id="sr-room-grid"></div>
+        <div class="sr-empty" id="sr-no-match" hidden>
+          <i data-lucide="search" aria-hidden="true"></i>
+          <h3>没有匹配的直播间</h3>
+          <p>试试其他名称，或切换直播平台。</p>
+        </div>
+      </section>
+
+      <!-- 3. 录播页 -->
+      <section class="sr-page" id="sr-archives" aria-label="录播页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>录播归档</h1>
+            <p class="sr-subtitle">管理历史录制场次，支持生成 AI 摘要与整场或分选区切片。</p>
+          </div>
+          <div class="sr-inline">
+            <select id="sr-archive-room-filter" class="sr-field sr-field-compact" aria-label="按直播间筛选录播">
+              <option value="all">全部直播间</option>
+            </select>
+            <select id="sr-archive-sort" class="sr-field sr-field-compact" aria-label="录播排序方式">
+              <option value="time">按录制时间（最新）</option>
+              <option value="size">按文件大小</option>
+              <option value="duration">按录制时长</option>
+            </select>
+          </div>
+        </div>
+        <div class="sr-records" id="sr-archive-table"></div>
+      </section>
+
+      <!-- 4. 素材页 -->
+      <section class="sr-page" id="sr-materials" aria-label="素材页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>素材库</h1>
+            <p class="sr-subtitle">从录播导出的视频片段或本地导入的视频素材，可组合创建切片工程。</p>
+          </div>
+          <div class="sr-inline">
+            <button type="button" class="sr-button" id="sr-import-material"><i data-lucide="upload" aria-hidden="true"></i>导入视频</button>
+            <button type="button" class="sr-button sr-button-primary" id="sr-create-clip-from-material"><i data-lucide="clapperboard" aria-hidden="true"></i>新建切片工程</button>
+          </div>
+        </div>
+        <div class="sr-records" id="sr-material-list"></div>
+      </section>
+
+      <!-- 5. 切片页（含切片工程与自动切片工作台） -->
+      <section class="sr-page" id="sr-clips" aria-label="切片页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>切片工作台</h1>
+            <p class="sr-subtitle">编辑多轨切片工程，或审核自动高能切片产出的候选片段。</p>
+          </div>
+          <div class="sr-platforms" role="tablist" aria-label="切片视图切换">
+            <button type="button" data-clip-tab="projects" aria-pressed="true">切片工程 (3)</button>
+            <button type="button" data-clip-tab="automation" aria-pressed="false"><i data-lucide="sparkles" aria-hidden="true"></i> 自动切片候选 (3)</button>
+          </div>
+        </div>
+        <div id="sr-clip-projects-view" class="sr-room-grid"></div>
+        <div id="sr-clip-automation-view" class="sr-records" hidden></div>
+      </section>
+
+      <!-- 6. 投稿页 -->
+      <section class="sr-page" id="sr-uploads" aria-label="投稿页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>投稿管理</h1>
+            <p class="sr-subtitle">管理发布至 B 站的视频稿件、分 P 续传与审核状态。</p>
+          </div>
+          <button type="button" class="sr-button sr-button-primary" id="sr-new-upload"><i data-lucide="upload" aria-hidden="true"></i>新建投稿</button>
+        </div>
+        <div class="sr-records" id="sr-upload-list"></div>
+      </section>
+
+      <!-- 7. 任务页 -->
+      <section class="sr-page" id="sr-tasks" aria-label="任务页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>任务列表</h1>
+            <p class="sr-subtitle">查看转码、字幕识别、AI 摘要与自动切片后台任务队列。</p>
+          </div>
+          <button type="button" class="sr-button" id="sr-clear-done-tasks"><i data-lucide="refresh-cw" aria-hidden="true"></i>清理已完成任务</button>
+        </div>
+        <div class="sr-records" id="sr-task-list"></div>
+      </section>
+
+      <!-- 8. 助手页 -->
+      <section class="sr-page" id="sr-ai" aria-label="助手页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>AI 录播助手</h1>
+            <p class="sr-subtitle">通过自然语言管理录制、检索高能时间点或执行视频转码。</p>
+          </div>
+          <button type="button" class="sr-button" data-page="settings"><i data-lucide="settings" aria-hidden="true"></i>模型设置</button>
+        </div>
+        <div class="sr-ai-presets" id="sr-ai-presets"></div>
+        <div class="sr-ai-chat" id="sr-ai-chat"></div>
+        <form class="sr-ai-input-bar" id="sr-ai-form">
+          <input id="sr-ai-input" class="sr-field" placeholder="输入指令，例如：分析今晚小岛电台录播的高能片段..." aria-label="向 AI 助手提问">
+          <button type="submit" class="sr-button sr-button-primary"><i data-lucide="send" aria-hidden="true"></i>发送</button>
+        </form>
+      </section>
+
+      <!-- 9. 账号页 -->
+      <section class="sr-page" id="sr-accounts" aria-label="账号页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>平台账号</h1>
+            <p class="sr-subtitle">配置各直播平台登录凭证，用于高码率录制、弹幕发送与视频投稿。</p>
+          </div>
+          <button type="button" class="sr-button sr-button-primary" id="sr-add-account"><i data-lucide="plus" aria-hidden="true"></i>添加账号</button>
+        </div>
+        <div class="sr-records" id="sr-account-list"></div>
+      </section>
+
+      <!-- 10. 设置页 -->
+      <section class="sr-page" id="sr-settings" aria-label="设置页面" hidden>
+        <div class="sr-heading">
+          <div>
+            <h1>系统设置</h1>
+            <p class="sr-subtitle">管理缓存路径、自动切片策略、字幕生成与大模型服务参数。</p>
+          </div>
+        </div>
+        <div class="sr-settings-grid">
+          <div class="sr-storage">
+            <h2>录制与存储</h2>
+            <label class="sr-form-label">录播缓存目录<input class="sr-field" value="D:\ShadowReplay\cache" readonly></label>
+            <label class="sr-form-label">切片输出目录<input class="sr-field" value="D:\ShadowReplay\output" readonly></label>
+          </div>
+          <div class="sr-storage">
+            <h2>AI 与字幕识别</h2>
+            <label class="sr-form-label">字幕生成器<select class="sr-field"><option>Whisper 本地模型 (ggml-medium)</option><option>OpenAI 兼容接口</option><option>PowerLive 云端转写</option></select></label>
+            <label class="sr-form-label">LLM 服务端点<input class="sr-field" value="https://api.openai.com/v1" readonly></label>
+          </div>
+        </div>
+      </section>
+
+      <!-- 11. 关于页 -->
+      <section class="sr-page" id="sr-about" aria-label="关于页面" hidden>
+        <div class="sr-storage" style="max-width: 520px">
+          <div class="sr-inline">
+            <span class="sr-brand-mark"><img alt="" src="./assets/icon.svg"></span>
+            <div>
+              <h2>ShadowReplay 2.24.1</h2>
+              <p class="sr-caption">多平台直播自动录制、弹幕高能分析与智能切片工具</p>
+            </div>
+          </div>
+          <div class="sr-storage-row" style="margin-top: 16px"><span>构建形态</span><span>Tauri 2 + Svelte 5 + Rust</span></div>
+          <div class="sr-storage-row"><span>支持平台</span><span>B 站 / 抖音 / 斗鱼 / 虎牙 / 快手 / TikTok / Twitch / YouTube</span></div>
+          <div class="sr-dialog-actions" style="justify-content: flex-start; margin-top: 16px">
+            <button type="button" class="sr-button" id="sr-check-update"><i data-lucide="refresh-cw" aria-hidden="true"></i>检查更新</button>
+          </div>
+        </div>
+      </section>
+
+      <footer class="sr-footer"><span>设计预览，数据为本地可交互示例</span><span>ShadowReplay 2.24.1</span></footer>
+    </div>
+  </div>
+
+  <div class="sr-toast" id="sr-toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- 添加直播间弹窗 -->
+  <div class="sr-dialog-backdrop" id="sr-add-dialog" hidden>
+    <section class="sr-dialog" role="dialog" aria-modal="true" aria-labelledby="sr-dialog-title">
+      <div class="sr-section-head">
+        <h2 id="sr-dialog-title">添加直播间</h2>
+        <button type="button" class="sr-quiet" data-close aria-label="关闭添加直播间"><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+      <label class="sr-form-label">直播平台
+        <select class="sr-field" id="sr-add-platform">
+          <option value="B 站">B 站</option>
+          <option value="抖音">抖音</option>
+          <option value="斗鱼">斗鱼</option>
+          <option value="虎牙">虎牙</option>
+          <option value="快手">快手</option>
+          <option value="TikTok">TikTok</option>
+          <option value="Twitch">Twitch</option>
+          <option value="YouTube">YouTube</option>
+        </select>
+      </label>
+      <label class="sr-form-label">直播间链接或房间号
+        <input class="sr-field" id="sr-add-room-id" placeholder="例如：22603245 或粘贴直播间链接">
+      </label>
+      <label class="sr-form-label">主播名称（选填，用于预览）
+        <input class="sr-field" id="sr-add-room-name" placeholder="例如：深夜茶话会">
+      </label>
+      <p class="sr-caption" style="margin-top: 10px">提交后将在当前原型列表中新增一张示例直播间卡片。</p>
+      <div class="sr-dialog-actions">
+        <button type="button" class="sr-button" data-close>取消</button>
+        <button type="button" class="sr-button sr-button-primary" id="sr-add-confirm">确认添加</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 自动切片设置弹窗 -->
+  <div class="sr-dialog-backdrop" id="sr-automation-dialog" hidden>
+    <section class="sr-dialog" role="dialog" aria-modal="true" aria-labelledby="sr-auto-dialog-title">
+      <div class="sr-section-head">
+        <h2 id="sr-auto-dialog-title">自动切片设置</h2>
+        <button type="button" class="sr-quiet" data-close-auto aria-label="关闭自动切片设置"><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+      <p class="sr-caption" id="sr-auto-room-subtitle">针对当前直播间在下播后自动分析弹幕高能与语音亮点。</p>
+      <div class="sr-form-label" style="margin-top: 14px">
+        <button type="button" class="sr-switch sr-switch-row" role="switch" aria-checked="true" id="sr-auto-enable-switch">
+          <span>下播后自动触发高能切片分析</span>
+          <span class="sr-switch-track" aria-hidden="true"></span>
+        </button>
+      </div>
+      <label class="sr-form-label">高能弹幕密度阈值 (%)
+        <input type="number" class="sr-field" id="sr-auto-threshold" min="40" max="95" value="75">
+      </label>
+      <label class="sr-form-label">高能触发关键词（逗号分隔）
+        <input class="sr-field" id="sr-auto-keywords" value="666, 哈哈, 绝了, 高能, 名场面">
+      </label>
+      <div class="sr-dialog-actions">
+        <button type="button" class="sr-button" data-close-auto>取消</button>
+        <button type="button" class="sr-button sr-button-primary" id="sr-auto-save">保存配置</button>
+      </div>
+    </section>
+  </div>
+</div>
+  <noscript>请启用 JavaScript，以查看原型的页面切换和筛选交互。</noscript>
+</body>
+</html>
