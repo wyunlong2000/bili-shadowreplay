@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatTimecode } from "../lib/time-format";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, get_static_url } from "../lib/invoker";
   import type { ProjectItem } from "../lib/interface";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
@@ -73,7 +74,15 @@
     }
   });
 
-  onMount(() => watchStateChanges(stateRefresh, ["projects-changed", "videos-changed"]));
+  const pageVisibility = usePageVisibility();
+  onMount(() =>
+    watchStateChanges(
+      stateRefresh,
+      ["projects-changed", "videos-changed"],
+      30_000,
+      pageVisibility,
+    ),
+  );
 
   onMount(() =>
     registerCommands([

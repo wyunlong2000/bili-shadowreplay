@@ -3,6 +3,7 @@
   import { formatSize } from "../lib/size-format";
   import { liveRoomUrl, platformLabel } from "../lib/platform";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, get_static_url } from "../lib/invoker";
   import type { RecordItem, RecordSummaryStatus } from "../lib/db";
   import { onMount } from "svelte";
@@ -72,11 +73,31 @@
 
   // 页面大小选项
   const pageSizeOptions = [10, 20, 50, 100];
+  // 单个直播间最大展示录播条数限制
+  const MAX_ARCHIVES_PER_ROOM = 100;
+
+  type ArchiveRecord = RecordItem & {
+    createdAtMs?: number;
+  };
 
   // 所有数据缓存
-  let allArchives = [];
+  let allArchives: ArchiveRecord[] = [];
   let allRooms: RecorderInfo[] = [];
 
+  /**
+   * 获取录播记录的创建时间戳（毫秒），复用预解析数值避免排序时重复构造 Date。
+   */
+  function getCreatedAtMs(record: ArchiveRecord): number {
+    if (typeof record.createdAtMs === "number") {
+      return record.createdAtMs;
+    }
+    const parsed = Date.parse(record.created_at);
+    const ms = Number.isNaN(parsed) ? 0 : parsed;
+    record.createdAtMs = ms;
+    return ms;
+  }
+
+  const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(fetchArchives);
 
   onMount(() => {
@@ -86,7 +107,12 @@
       pageSize = parseInt(savedPageSize);
     }
 
-    return watchStateChanges(stateRefresh, ["records-changed", "recorders-changed"]);
+    return watchStateChanges(
+      stateRefresh,
+      ["records-changed", "recorders-changed"],
+      30_000,
+      pageVisibility,
+    );
   });
 
   onMount(() =>
@@ -120,8 +146,16 @@
     loadError = "";
 
     try {
-      // 获取所有直播间列表
-      const recorderList: RecorderList = await invoke("get_recorder_list");
+      // 并发获取直播间列表、全量录播记录及摘要状态，消除按房间串行请求的 N+1 开销
+      const [recorderList, recentRecords] = await Promise.all([
+        invoke<RecorderList>("get_recorder_list"),
+        invoke<RecordItem[]>("get_recent_record", {
+          roomId: "",
+          offset: 0,
+          limit: -1,
+        }),
+        loadSummaryStatuses(),
+      ]);
       allRooms = recorderList.recorders || [];
 
       // 收集所有直播间，用账号名/直播间标题+直播间号展示
@@ -137,38 +171,37 @@
         })
         .sort((a, b) => a.label.localeCompare(b.label));
 
-      // 加载所有录播数据
-      allArchives = [];
-      for (const room of allRooms) {
-        try {
-          const roomArchives = await invoke<RecordItem[]>("get_archives", {
-            roomId: room.room_info.room_id,
-            offset: 0,
-            limit: 100, // 每个直播间获取更多数据
-          });
+      // 按当前直播间过滤并保留每个直播间最新 100 条限制，同时预先换算创建时间戳
+      const validRoomIds = new Set(
+        allRooms.map((room: RecorderInfo) => room.room_info.room_id),
+      );
+      const roomArchiveCounts = new Map<string, number>();
+      const nextArchives: ArchiveRecord[] = [];
 
-          // 处理封面
-          for (const archive of roomArchives) {
-            archive.cover = await get_static_url(
-              "cache",
-              `${archive.platform}/${archive.room_id}/${archive.live_id}/cover.jpg`
-            );
-          }
-
-          allArchives = [...allArchives, ...roomArchives];
-        } catch (error) {
-          console.warn(`Failed to load archives for room ${room}:`, error);
+      for (const archive of recentRecords || []) {
+        if (!validRoomIds.has(archive.room_id)) {
+          continue;
         }
+        const currentCount = roomArchiveCounts.get(archive.room_id) ?? 0;
+        if (currentCount >= MAX_ARCHIVES_PER_ROOM) {
+          continue;
+        }
+        roomArchiveCounts.set(archive.room_id, currentCount + 1);
+
+        const parsedCreatedAt = Date.parse(archive.created_at);
+        nextArchives.push({
+          ...archive,
+          cover: await get_static_url(
+            "cache",
+            `${archive.platform}/${archive.room_id}/${archive.live_id}/cover.jpg`,
+          ),
+          createdAtMs: Number.isNaN(parsedCreatedAt) ? 0 : parsedCreatedAt,
+        });
       }
 
-      // 按创建时间排序
-      allArchives.sort((a, b) => {
-        return (
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-        );
-      });
-
-      await loadSummaryStatuses();
+      // 按预解析的创建时间戳排序
+      nextArchives.sort((a, b) => getCreatedAtMs(b) - getCreatedAtMs(a));
+      allArchives = nextArchives;
 
       totalCount = allArchives.length;
       updatePagination();
@@ -323,8 +356,8 @@
           bValue = b.size;
           break;
         case "created_at":
-          aValue = new Date(a.created_at);
-          bValue = new Date(b.created_at);
+          aValue = getCreatedAtMs(a);
+          bValue = getCreatedAtMs(b);
           break;
         case "room_id":
           aValue = a.room_id;
@@ -335,8 +368,8 @@
           bValue = (b.platform || "").toLowerCase();
           break;
         default:
-          aValue = new Date(a.created_at);
-          bValue = new Date(b.created_at);
+          aValue = getCreatedAtMs(a);
+          bValue = getCreatedAtMs(b);
       }
 
       if (sortOrder === "asc") {

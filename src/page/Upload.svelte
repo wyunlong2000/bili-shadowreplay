@@ -20,6 +20,7 @@
   import type { ProjectItem, UploadItem, UploadStatus, VideoItem } from "../lib/interface";
   import { registerCommands } from "../lib/stores/commands";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import {
     draftProfile,
     isUploadActive,
@@ -87,6 +88,7 @@
     return { ...upload, title: uploadTitle(upload), coverUrl };
   }
 
+  const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(async () => {
     try {
       const list = await invoke<UploadItem[]>("get_uploads");
@@ -105,7 +107,12 @@
   });
 
   onMount(() =>
-    watchStateChanges(stateRefresh, ["uploads-changed", "projects-changed", "videos-changed"]),
+    watchStateChanges(
+      stateRefresh,
+      ["uploads-changed", "projects-changed", "videos-changed"],
+      30_000,
+      pageVisibility,
+    ),
   );
 
   onMount(() =>

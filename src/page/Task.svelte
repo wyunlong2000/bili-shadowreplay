@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { invoke } from "../lib/invoker";
   import { fade } from "svelte/transition";
   import {
@@ -278,7 +279,8 @@
     }
   }
 
-  onMount(() => watchStateChanges(stateRefresh, ["tasks-changed"]));
+  const pageVisibility = usePageVisibility();
+  onMount(() => watchStateChanges(stateRefresh, ["tasks-changed"], 30_000, pageVisibility));
 
   onMount(() =>
     registerCommands([

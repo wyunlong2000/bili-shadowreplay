@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { formatSize } from "../lib/size-format";
 
   import { get_static_url, invoke } from "../lib/invoker";
@@ -45,6 +46,7 @@
   let hasNewRecords = $state(false);
   const RECORDS_PER_PAGE = 5;
 
+  const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(update_summary);
 
   async function update_summary() {
@@ -134,7 +136,14 @@
     }
   }
 
-  onMount(() => watchStateChanges(stateRefresh, ["recorders-changed", "records-changed"]));
+  onMount(() =>
+    watchStateChanges(
+      stateRefresh,
+      ["recorders-changed", "records-changed"],
+      30_000,
+      pageVisibility,
+    ),
+  );
 
   async function get_archive_disk_usage() {
     const total_size = (await invoke("get_archive_disk_usage")) as number;

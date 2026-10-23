@@ -62,18 +62,53 @@ export function createStateRefresh(
   };
 }
 
-/** Subscribe before the first snapshot; return synchronous onMount cleanup. */
+/** 页面激活状态感知接口，用于在页面隐藏时挂起刷新并在重新激活时补齐。 */
+export interface PageVisibility {
+  /** 返回当前页面是否处于激活可见状态。 */
+  isVisible: () => boolean;
+  /** 订阅页面激活状态变化，返回取消订阅函数。 */
+  subscribe?: (listener: (visible: boolean) => void) => () => void;
+}
+
+/** 在首次快照前完成事件订阅，支持按页面激活状态挂起后台刷新，并返回同步清理函数。 */
 export function watchStateChanges(
   refresh: ReturnType<typeof createStateRefresh>,
   events: string[],
   fallbackMs = 30_000,
+  pageVisibility?: PageVisibility,
 ): () => void {
   let disposed = false;
   let ready = false;
+  let dirty = false;
   const unlisteners: Array<() => void> = [];
-  const visible = () => document.visibilityState !== "hidden";
-  const schedule = () => { if (ready && visible()) refresh.schedule(); };
-  const resync = () => { if (ready && visible()) void refresh.run(); };
+  const isPageActive = () => (pageVisibility ? pageVisibility.isVisible() : true);
+  const visible = () => document.visibilityState !== "hidden" && isPageActive();
+  const schedule = () => {
+    if (!ready) return;
+    if (visible()) {
+      dirty = false;
+      refresh.schedule();
+    } else {
+      dirty = true;
+    }
+  };
+  const resync = () => {
+    if (!ready) return;
+    if (visible()) {
+      dirty = false;
+      void refresh.run();
+    } else {
+      dirty = true;
+    }
+  };
+  const onPageVisibilityChange = (active: boolean) => {
+    if (!ready || !active) return;
+    if (dirty && visible()) {
+      dirty = false;
+      void refresh.run();
+    }
+  };
+  const unsubscribePage = pageVisibility?.subscribe?.(onPageVisibilityChange);
 
   void (async () => {
     await Promise.all([...new Set([...events, "state-resync"])].map(async (event) => {
@@ -87,7 +122,12 @@ export function watchStateChanges(
     }));
     if (!disposed) {
       ready = true;
-      await refresh.run();
+      if (visible()) {
+        dirty = false;
+        await refresh.run();
+      } else {
+        dirty = true;
+      }
     }
   })();
 
@@ -98,7 +138,9 @@ export function watchStateChanges(
   return () => {
     disposed = true;
     ready = false;
+    dirty = false;
     clearInterval(timer);
+    unsubscribePage?.();
     refresh.stop();
     for (const unlisten of unlisteners) unlisten();
     document.removeEventListener("visibilitychange", resync);

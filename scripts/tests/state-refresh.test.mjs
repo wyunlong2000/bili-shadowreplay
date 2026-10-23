@@ -204,6 +204,60 @@ test("unmount discards timers and trailing refreshes while a request finishes", 
   assert.equal(f.timeouts.size, 0);
 });
 
+test("hidden page marks state dirty and refreshes once when activated", async () => {
+  const f = await fixture();
+  let calls = 0;
+  let active = false;
+  const pageListeners = new Set();
+  const pageVisibility = {
+    isVisible: () => active,
+    subscribe: (cb) => {
+      pageListeners.add(cb);
+      return () => pageListeners.delete(cb);
+    },
+  };
+  const setPageActive = (next) => {
+    active = next;
+    for (const cb of pageListeners) cb(next);
+  };
+
+  const refresh = f.api.createStateRefresh(async () => { calls++; });
+  const stop = f.api.watchStateChanges(refresh, ["records-changed"], 30_000, pageVisibility);
+  await settle();
+  // 初始处于后台隐藏状态时不立即拉取，仅标记脏状态
+  assert.equal(calls, 0);
+
+  // 后台期间高频事件与兜底定时器均只标记脏状态，不发起请求
+  f.handlers.get("records-changed")();
+  f.handlers.get("records-changed")();
+  [...f.intervals.values()][0]();
+  await f.flushTimers();
+  assert.equal(calls, 0);
+
+  // 切换到该页面时立即补齐一次拉取
+  setPageActive(true);
+  await settle();
+  assert.equal(calls, 1);
+
+  // 切走再切回且期间无变更时，不重复请求
+  setPageActive(false);
+  setPageActive(true);
+  await settle();
+  assert.equal(calls, 1);
+
+  // 切走期间发生变更，切回时再次拉取一次
+  setPageActive(false);
+  f.handlers.get("records-changed")();
+  await f.flushTimers();
+  assert.equal(calls, 1);
+  setPageActive(true);
+  await settle();
+  assert.equal(calls, 2);
+
+  stop();
+  assert.equal(pageListeners.size, 0);
+});
+
 async function invokerFixture({ tauri = false, invokeRoom = async () => null, nativeReady, ackRoom = async () => ({ ok: true }) } = {}) {
   const retryTimers = new Map();
   let timerId = 0;

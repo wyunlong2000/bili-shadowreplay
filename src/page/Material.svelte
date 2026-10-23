@@ -3,6 +3,7 @@
   import { formatSize } from "../lib/size-format";
   import { liveRoomUrl, platformLabel } from "../lib/platform";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, TAURI_ENV, get_static_url } from "../lib/invoker";
   import type { VideoItem } from "../lib/interface";
   import ImportVideoDialog from "../lib/components/ImportVideoDialog.svelte";
@@ -62,7 +63,8 @@
   let videoToEditNote: VideoItem | null = $state(null);
   let editingNote = $state("");
 
-  onMount(() => watchStateChanges(stateRefresh, ["videos-changed"]));
+  const pageVisibility = usePageVisibility();
+  onMount(() => watchStateChanges(stateRefresh, ["videos-changed"], 30_000, pageVisibility));
 
   onMount(() =>
     registerCommands([

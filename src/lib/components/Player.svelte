@@ -31,11 +31,19 @@
   let stopDanmu: (() => void) | undefined;
   let cancelDanmuBatch: (() => void) | undefined;
   let floatingOverlay: ReturnType<typeof createFloatingOverlay> | undefined;
+  let streamListTimer: ReturnType<typeof setInterval> | null = null;
+  let danmuHistoryTimer: ReturnType<typeof setInterval> | null = null;
+  let danmuStatsTimer: ReturnType<typeof setInterval> | null = null;
+  let seekbarRafId: number | null = null;
   const danmuSubscription = new AbortController();
   onDestroy(() => {
     destroyed = true;
     danmuSubscription.abort();
     document.removeEventListener("shaka-ui-loaded", init);
+    if (streamListTimer !== null) clearInterval(streamListTimer);
+    if (danmuHistoryTimer !== null) clearInterval(danmuHistoryTimer);
+    if (danmuStatsTimer !== null) clearInterval(danmuStatsTimer);
+    if (seekbarRafId !== null) cancelAnimationFrame(seekbarRafId);
     stopDanmu?.();
     cancelDanmuBatch?.();
     floatingOverlay?.destroy();
@@ -455,7 +463,7 @@ ${mediaPlaylistUrl}`;
     initialized = true;
     update_stream_list();
 
-    setInterval(async () => {
+    streamListTimer = setInterval(async () => {
       await update_stream_list();
     }, 5 * 1000);
 
@@ -602,7 +610,7 @@ ${mediaPlaylistUrl}`;
 
     let danmu_displayed = {};
     // history danmaku sender
-    setInterval(() => {
+    danmuHistoryTimer = setInterval(() => {
       if (video.paused || !danmu_enabled || danmu_records.length == 0) {
         return;
       }
@@ -1006,14 +1014,18 @@ ${mediaPlaylistUrl}`;
     });
 
     // Close menu when clicking outside
-    document.addEventListener("click", (e) => {
-      if (
-        !playbackRateButton.contains(e.target as Node) &&
-        !SettingMenu.contains(e.target as Node)
-      ) {
-        SettingMenu.style.display = "none";
-      }
-    });
+    document.addEventListener(
+      "click",
+      (e) => {
+        if (
+          !playbackRateButton.contains(e.target as Node) &&
+          !SettingMenu.contains(e.target as Node)
+        ) {
+          SettingMenu.style.display = "none";
+        }
+      },
+      { signal: danmuSubscription.signal },
+    );
 
     shakaSpacer.appendChild(playbackRateButton);
     shakaSpacer.appendChild(SettingMenu);
@@ -1049,7 +1061,7 @@ ${mediaPlaylistUrl}`;
     update_statistics();
 
     if (isLive()) {
-      setInterval(async () => {
+      danmuStatsTimer = setInterval(async () => {
         update_statistics();
       }, 10 * 1000);
     }
@@ -1075,7 +1087,9 @@ ${mediaPlaylistUrl}`;
     loadRanges();
 
     // add keydown event listener for '[' and ']' to control range
-    document.addEventListener("keydown", async (e) => {
+    document.addEventListener(
+      "keydown",
+      async (e) => {
       const target = e.target as HTMLInputElement;
       if (
         target.tagName.toLowerCase() === "input" ||
@@ -1298,7 +1312,9 @@ ${mediaPlaylistUrl}`;
           }
           break;
       }
-    });
+      },
+      { signal: danmuSubscription.signal },
+    );
 
     const seekbarContainer = selfSeekbar.querySelector(
       ".shaka-seek-bar-container.self-defined"
@@ -1347,8 +1363,11 @@ ${mediaPlaylistUrl}`;
     currentRangeHighlight.style.boxShadow = "0 0 8px rgba(255, 215, 0, 0.8)"; // 发光效果
     seekbarContainer.appendChild(currentRangeHighlight);
 
-    // draw statistics
-    function drawStatistics(points: { ts: number; count: number }[]) {
+    // 绘制弹幕密度统计折线图，复用预读取的容器宽度避免触发强制同步布局
+    function drawStatistics(
+      points: { ts: number; count: number }[],
+      containerWidth: number,
+    ) {
       if (points == undefined) {
         points = [];
       }
@@ -1374,9 +1393,9 @@ ${mediaPlaylistUrl}`;
         preprocessed.push(points[points.length - 1]);
       }
       const scale = window.devicePixelRatio || 1;
-      statisticGraph.width = seekbarContainer.clientWidth * scale;
+      statisticGraph.width = containerWidth * scale;
       statisticGraph.height = 16 * scale;
-      statisticGraph.style.width = `${seekbarContainer.clientWidth}px`;
+      statisticGraph.style.width = `${containerWidth}px`;
       statisticGraph.style.height = "16px";
       const canvasHeight = statisticGraph.height;
       const canvasWidth = statisticGraph.width;
@@ -1420,13 +1439,26 @@ ${mediaPlaylistUrl}`;
       }
     }
 
+    let lastHighlightSignature = "";
     let lastRangeSignature = "";
     let lastMarkerSignature = "";
     let lastStatsSignature = "";
+    let cachedAdMarkers: HTMLElement | null = null;
 
     function updateSeekbar() {
+      if (destroyed) return;
+
+      // 统一在写入任何 DOM 样式前读取布局属性与缓存节点，消除每帧强制重排（Layout Thrashing）
       const total = get_total();
       const live = isLive();
+      const containerWidth = seekbarContainer.clientWidth;
+      if (!cachedAdMarkers || !cachedAdMarkers.isConnected) {
+        cachedAdMarkers = document.querySelector(
+          ".shaka-ad-markers",
+        ) as HTMLElement | null;
+      }
+      const adMarkers = cachedAdMarkers;
+
       if (is_live !== live) {
         is_live = live;
       }
@@ -1441,24 +1473,30 @@ ${mediaPlaylistUrl}`;
         playback_time = video.currentTime;
       }
 
-      // 更新当前区间高亮覆盖层
+      // 更新当前区间高亮覆盖层（仅在签名变化时写入样式）
       const currentRange =
         selected_range_index >= 0 && selected_range_index < ranges.length
           ? ranges[selected_range_index]
           : null;
+      const highlightSignature =
+        currentRange && total > 0
+          ? `${total.toFixed(2)}:${currentRange.start}:${currentRange.end}:${containerWidth}`
+          : "none";
 
-      if (currentRange && total > 0) {
-        const rangeStart = currentRange.start / total;
-        const rangeEnd = currentRange.end / total;
-        const containerWidth = seekbarContainer.clientWidth;
-        const left = rangeStart * containerWidth;
-        const width = (rangeEnd - rangeStart) * containerWidth;
+      if (highlightSignature !== lastHighlightSignature) {
+        lastHighlightSignature = highlightSignature;
+        if (currentRange && total > 0) {
+          const rangeStart = currentRange.start / total;
+          const rangeEnd = currentRange.end / total;
+          const left = rangeStart * containerWidth;
+          const width = (rangeEnd - rangeStart) * containerWidth;
 
-        currentRangeHighlight.style.left = `${left}px`;
-        currentRangeHighlight.style.width = `${width}px`;
-        currentRangeHighlight.style.display = "block";
-      } else {
-        currentRangeHighlight.style.display = "none";
+          currentRangeHighlight.style.left = `${left}px`;
+          currentRangeHighlight.style.width = `${width}px`;
+          currentRangeHighlight.style.display = "block";
+        } else {
+          currentRangeHighlight.style.display = "none";
+        }
       }
 
       const rangeSignature = `${total.toFixed(2)}:${selected_range_index}:${ranges
@@ -1515,10 +1553,7 @@ ${mediaPlaylistUrl}`;
       const markerSignature = `${total.toFixed(2)}:${markers
         .map((marker) => marker.offset)
         .join(",")}`;
-      const statsSignature = `${total.toFixed(1)}:${statsDataSignature}:${seekbarContainer.clientWidth}`;
-      const adMarkers = document.querySelector(
-        ".shaka-ad-markers"
-      ) as HTMLElement;
+      const statsSignature = `${total.toFixed(1)}:${statsDataSignature}:${containerWidth}`;
       if (adMarkers && markerSignature !== lastMarkerSignature) {
         lastMarkerSignature = markerSignature;
         adMarkers.innerHTML = "";
@@ -1546,11 +1581,11 @@ ${mediaPlaylistUrl}`;
       }
       if (adMarkers && statsSignature !== lastStatsSignature) {
         lastStatsSignature = statsSignature;
-        drawStatistics(danmu_statistics);
+        drawStatistics(danmu_statistics, containerWidth);
       }
-      requestAnimationFrame(updateSeekbar);
+      seekbarRafId = requestAnimationFrame(updateSeekbar);
     }
-    requestAnimationFrame(updateSeekbar);
+    seekbarRafId = requestAnimationFrame(updateSeekbar);
   }
 
   // receive tauri emit

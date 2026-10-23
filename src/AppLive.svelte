@@ -61,8 +61,8 @@
 
   log.info("AppLive loaded", room_id, platform, live_id);
 
-  // 弹幕相关变量
-  let danmu_records: DanmuEntry[] = $state([]);
+  // 弹幕相关变量（使用浅层响应式状态避免全量遍历代理对象的性能开销）
+  let danmu_records: DanmuEntry[] = $state.raw([]);
 
   // 弹幕峰值检测相关变量
   interface DanmuPeak {

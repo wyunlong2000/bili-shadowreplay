@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
+  import { usePageVisibility } from "../lib/page-visibility";
   import { formatSize } from "../lib/size-format";
   import { liveRoomUrl } from "../lib/platform";
   import { invoke, open, onOpenUrl, get_static_url, get } from "../lib/invoker";
@@ -142,32 +143,127 @@
     return coverMap[platform] || "/imgs/huya.png";
   }
 
+  const IMAGE_FETCH_TIMEOUT_MS = 10_000;
+  const MAX_IMAGE_CACHE_ENTRIES = 200;
   let avatar_cache: Map<string, string> = new Map();
-  async function get_avatar_url(user_id: string, url: string) {
-    if (avatar_cache.has(user_id)) {
-      return avatar_cache.get(user_id);
-    }
-    console.log("get avatar url:", url);
-    const response = await get(url);
-    const blob = await response.blob();
-    const avatar_url = URL.createObjectURL(blob);
-    avatar_cache.set(user_id, avatar_url);
-    return avatar_url;
-  }
-
   let image_cache: Map<string, string> = new Map();
-  async function get_image_url(url: string) {
-    if (image_cache.has(url)) {
-      return image_cache.get(url);
+  let inflight_images: Map<string, Promise<string | null>> = new Map();
+
+  /**
+   * 写入图片 ObjectURL 缓存并在超过上限时释放最旧条目，防止长会话内存泄漏。
+   */
+  function setImageCacheEntry(
+    cache: Map<string, string>,
+    key: string,
+    objectUrl: string,
+  ) {
+    if (cache.has(key)) {
+      const prev = cache.get(key);
+      cache.delete(key);
+      if (prev && prev !== objectUrl) {
+        URL.revokeObjectURL(prev);
+      }
+    } else if (cache.size >= MAX_IMAGE_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        const oldestUrl = cache.get(oldestKey);
+        cache.delete(oldestKey);
+        if (oldestUrl) {
+          URL.revokeObjectURL(oldestUrl);
+        }
+      }
     }
-    console.log("get image url:", url);
-    const response = await get(url);
-    const blob = await response.blob();
-    const cover_url = URL.createObjectURL(blob);
-    image_cache.set(url, cover_url);
-    return cover_url;
+    cache.set(key, objectUrl);
   }
 
+  /**
+   * 带超时控制地通过代理获取远程图片并转为 ObjectURL，失败或超时返回 null。
+   */
+  async function fetchImageObjectUrl(
+    cache: Map<string, string>,
+    cacheKey: string,
+    url: string,
+  ): Promise<string | null> {
+    if (!url) return null;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
+
+    const inflightKey = `${cache === avatar_cache ? "avatar" : "cover"}:${cacheKey}:${url}`;
+    const existing = inflight_images.get(inflightKey);
+    if (existing) return existing;
+
+    const task = (async (): Promise<string | null> => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error("图片加载超时")),
+            IMAGE_FETCH_TIMEOUT_MS,
+          );
+        });
+        const response = await Promise.race([get(url), timeoutPromise]);
+        if (!response || !response.ok) {
+          return null;
+        }
+        const blob = await Promise.race([response.blob(), timeoutPromise]);
+        if (!blob || blob.size === 0) {
+          return null;
+        }
+        const objectUrl = URL.createObjectURL(blob);
+        setImageCacheEntry(cache, cacheKey, objectUrl);
+        return objectUrl;
+      } catch (error) {
+        console.warn("加载直播间图片失败，已回退默认图:", error);
+        return null;
+      } finally {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+        inflight_images.delete(inflightKey);
+      }
+    })();
+
+    inflight_images.set(inflightKey, task);
+    return task;
+  }
+
+  /**
+   * 异步加载单个直播间的头像与封面，完成后按需更新对应卡片，不阻塞列表主刷新。
+   */
+  async function hydrateRoomImages(
+    platform: string,
+    roomId: string,
+    userId: string,
+    rawAvatarUrl: string,
+    rawCoverUrl: string,
+  ) {
+    const avatarKey = userId ? `${platform}:${userId}:${rawAvatarUrl}` : `${platform}:${roomId}:${rawAvatarUrl}`;
+    const avatarPromise = rawAvatarUrl
+      ? fetchImageObjectUrl(avatar_cache, avatarKey, rawAvatarUrl)
+      : Promise.resolve(null);
+    const coverPromise = rawCoverUrl
+      ? fetchImageObjectUrl(image_cache, rawCoverUrl, rawCoverUrl)
+      : Promise.resolve(null);
+
+    const [avatarUrl, coverUrl] = await Promise.all([avatarPromise, coverPromise]);
+    if (!avatarUrl && !coverUrl) return;
+
+    const target = summary.recorders.find(
+      (r) => r.room_info.platform === platform && r.room_info.room_id === roomId,
+    );
+    if (!target) return;
+
+    if (avatarUrl) {
+      target.user_info.user_avatar = avatarUrl;
+    }
+    if (coverUrl) {
+      target.room_info.room_cover = coverUrl;
+    } else if (!rawCoverUrl && avatarUrl) {
+      target.room_info.room_cover = avatarUrl;
+    }
+  }
+
+  const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(update_summary);
 
   async function update_summary() {
@@ -200,31 +296,51 @@
       );
     });
 
-    // process room cover
+    // 先同步填充已缓存图片或默认图，未命中缓存的图片转入后台异步加载，不阻塞列表更新
+    const pendingHydrations: Array<() => void> = [];
     for (const room of new_summary.recorders) {
-      if (room.user_info.user_avatar != "") {
-        room.user_info.user_avatar = await get_avatar_url(
-          room.user_info.user_id,
-          room.user_info.user_avatar,
-        );
+      const platform = room.room_info.platform;
+      const roomId = room.room_info.room_id;
+      const userId = room.user_info.user_id;
+      const rawAvatarUrl = room.user_info.user_avatar;
+      const rawCoverUrl = room.room_info.room_cover;
+      const avatarKey = userId
+        ? `${platform}:${userId}:${rawAvatarUrl}`
+        : `${platform}:${roomId}:${rawAvatarUrl}`;
+
+      const cachedAvatar = rawAvatarUrl ? avatar_cache.get(avatarKey) : undefined;
+      room.user_info.user_avatar = cachedAvatar || default_avatar(platform);
+
+      const cachedCover = rawCoverUrl ? image_cache.get(rawCoverUrl) : undefined;
+      if (cachedCover) {
+        room.room_info.room_cover = cachedCover;
+      } else if (!rawCoverUrl && cachedAvatar) {
+        room.room_info.room_cover = cachedAvatar;
       } else {
-        room.user_info.user_avatar = default_avatar(room.room_info.platform);
+        room.room_info.room_cover = default_cover(platform);
       }
 
-      if (room.room_info.room_cover != "") {
-        room.room_info.room_cover = await get_image_url(
-          room.room_info.room_cover,
-        );
-      } else if (room.user_info.user_avatar != "") {
-        room.room_info.room_cover = room.user_info.user_avatar;
-      } else {
-        room.room_info.room_cover = default_cover(room.room_info.platform);
+      if ((rawAvatarUrl && !cachedAvatar) || (rawCoverUrl && !cachedCover)) {
+        pendingHydrations.push(() => {
+          void hydrateRoomImages(
+            platform,
+            roomId,
+            userId,
+            rawAvatarUrl,
+            rawCoverUrl,
+          );
+        });
       }
     }
 
     summary = new_summary;
+    for (const startHydration of pendingHydrations) {
+      startHydration();
+    }
   }
-  onMount(() => watchStateChanges(stateRefresh, ["recorders-changed"]));
+  onMount(() =>
+    watchStateChanges(stateRefresh, ["recorders-changed"], 30_000, pageVisibility),
+  );
 
   let searchInput: HTMLInputElement | null = $state(null);
 

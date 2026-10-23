@@ -4,6 +4,7 @@
     providePageTitlebar,
     type PageTitlebarContent,
   } from "../page-titlebar";
+  import { providePageVisibility } from "../page-visibility";
 
   // One page of the main window. Pages stay mounted and are only hidden, so
   // each keeps its state; `titlebar` receives what the page's `PageTitlebar`
@@ -18,6 +19,11 @@
   let { visible, titlebar = $bindable(), children }: Props = $props();
 
   providePageTitlebar((content) => (titlebar = content));
+  const pageVisibility = providePageVisibility(() => visible);
+
+  $effect(() => {
+    pageVisibility.notify(visible);
+  });
 </script>
 
 <div class="page" class:visible>
@@ -31,6 +37,7 @@
     flex-direction: column;
     overflow: hidden;
     opacity: 0;
+    content-visibility: hidden;
     transform: translateX(100%);
     transition:
       opacity 0.5s ease-in-out,
@@ -40,6 +47,7 @@
   .page.visible {
     height: 100%;
     opacity: 1;
+    content-visibility: visible;
     transform: translateX(0);
   }
 </style>

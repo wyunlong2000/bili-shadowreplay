@@ -12,6 +12,7 @@
   import type { AutomationCandidateRow, AutomationRunRow } from "../../interface";
   import { invoke } from "../../invoker";
   import { createStateRefresh, watchStateChanges } from "../../state-refresh";
+  import { usePageVisibility } from "../../page-visibility";
   import CandidateList from "./CandidateList.svelte";
   import CandidateDetail from "./CandidateDetail.svelte";
   import RunAutomationDialog from "./RunAutomationDialog.svelte";
@@ -102,6 +103,7 @@
     }
   });
 
+  const pageVisibility = usePageVisibility();
   const stateRefresh = createStateRefresh(async () => {
     await refreshRuns();
     if (selectedRunId) {
@@ -110,8 +112,7 @@
   });
 
   onMount(() => {
-    refreshRuns();
-    return watchStateChanges(stateRefresh, ["automation-changed"]);
+    return watchStateChanges(stateRefresh, ["automation-changed"], 30_000, pageVisibility);
   });
 
   async function handleCancelRun() {
