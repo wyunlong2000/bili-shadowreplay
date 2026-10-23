@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatTimecode } from "../lib/time-format";
+  import { formatTimecode, formatDateTimeParts } from "../lib/time-format";
   import { formatSize } from "../lib/size-format";
   import { liveRoomUrl, platformLabel } from "../lib/platform";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
@@ -801,6 +801,7 @@
             <tbody class="divide-y divide-line">
               {#each filteredArchives as archive (getArchiveKey(archive))}
                 {@const roomUrl = liveRoomUrl(archive.platform, archive.room_id)}
+                {@const dt = formatDateTimeParts(archive.created_at)}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-4 py-2.5">
                     <input
@@ -813,11 +814,11 @@
 
                   <td class="px-4 py-2.5">
                     <div class="flex flex-col">
-                      <span class="text-[13px] tabular-nums text-fg"
-                        >{formatDate(archive.created_at).split(" ")[0]}</span
+                      <span class="text-[13px] tabular-nums text-fg leading-tight"
+                        >{dt.date}</span
                       >
-                      <span class="text-[11px] tabular-nums text-fg-muted"
-                        >{formatDate(archive.created_at).split(" ")[1]}</span
+                      <span class="text-[11px] tabular-nums text-fg-muted leading-tight"
+                        >{dt.time}</span
                       >
                     </div>
                   </td>
@@ -870,7 +871,9 @@
                           class="h-8 w-12 flex-shrink-0 rounded-[5px] object-cover"
                         />
                       {/if}
-                      <span class="truncate text-[13px] text-fg"
+                      <span
+                        class="line-clamp-2 break-all text-[13px] text-fg leading-snug"
+                        title={archive.title}
                         >{archive.title}</span
                       >
                     </div>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { formatDateTimeParts } from "../lib/time-format";
   import {
     Calendar,
     ExternalLink,
@@ -280,18 +281,19 @@
         </div>
       {:else}
         <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full table-fixed whitespace-nowrap">
+          <table class="w-full">
             <thead>
               <tr class="border-b border-line bg-control/60">
-                <th class="w-[22rem] px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
+                <th class="min-w-[260px] px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
                 <th class="w-44 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">状态</th>
                 <th class="w-32 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">账号</th>
-                <th class="w-44 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">更新时间</th>
+                <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">更新时间</th>
                 <th class="w-28 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
               {#each filtered as upload (upload.id)}
+                {@const dt = formatDateTimeParts(upload.updated_at)}
                 {@const editable = upload.status === "draft" || upload.status === "failed"}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-4 py-2.5">
@@ -308,7 +310,7 @@
                         {/if}
                       </div>
                       <div class="min-w-0 flex-1">
-                        <p class="truncate text-[12px] font-medium text-fg" title={upload.title}>{upload.title}</p>
+                        <p class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug" title={upload.title}>{upload.title}</p>
                         <p class="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-muted">
                           <span class="ui-badge shrink-0">{sourceLabels[upload.source]}</span>
                           <span class="truncate" title={upload.source_title}>
@@ -352,7 +354,10 @@
                   <td class="px-4 py-2.5">
                     <div class="flex items-center gap-2 text-[12px] text-fg-secondary">
                       <Calendar class="h-3.5 w-3.5 shrink-0 text-fg-faint" />
-                      <span class="truncate">{new Date(upload.updated_at).toLocaleString()}</span>
+                      <div class="flex flex-col min-w-0">
+                        <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
+                        <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>
+                      </div>
                     </div>
                   </td>
                   <td class="px-4 py-2.5">

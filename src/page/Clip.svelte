@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatTimecode } from "../lib/time-format";
+  import { formatTimecode, formatDateTimeParts } from "../lib/time-format";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
   import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, get_static_url } from "../lib/invoker";
@@ -258,19 +258,20 @@
         </div>
       {:else}
         <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full table-fixed whitespace-nowrap">
+          <table class="w-full">
             <thead>
               <tr class="border-b border-line bg-control/60">
-                <th class="w-80 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">切片</th>
+                <th class="min-w-[260px] px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">切片</th>
                 <th class="w-28 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
                 <th class="w-32 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">内容</th>
                 <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">投稿</th>
-                <th class="w-40 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">最近编辑</th>
+                <th class="w-36 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">最近编辑</th>
                 <th class="w-40 px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
               {#each filtered as project (project.id)}
+                {@const dt = formatDateTimeParts(project.updated_at)}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-4 py-2.5">
                     <button
@@ -286,7 +287,7 @@
                         {/if}
                       </div>
                       <div class="min-w-0 flex-1">
-                        <p class="truncate text-[12px] font-medium text-fg" title={project.title}>
+                        <p class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug" title={project.title}>
                           {project.title || "未命名切片"}
                         </p>
                         <p class="truncate text-[11px] text-fg-muted" title={project.note}>
@@ -322,10 +323,13 @@
                       <span class="text-[12px] text-fg-faint">未投稿</span>
                     {/if}
                   </td>
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-2 text-[12px] text-fg-secondary">
-                      <Calendar class="table-icon text-fg-faint" />
-                      <span class="truncate">{new Date(project.updated_at).toLocaleString()}</span>
+                  <td class="px-4 py-2.5 w-36">
+                    <div class="flex items-center gap-2 text-fg-secondary">
+                      <Calendar class="table-icon text-fg-faint shrink-0" />
+                      <div class="flex flex-col min-w-0">
+                        <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
+                        <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>
+                      </div>
                     </div>
                   </td>
                   <td class="px-4 py-2.5">

@@ -18,3 +18,24 @@ export function formatTimecode(seconds: number, decimals = 1): string {
     ? `${hours}:${String(minutes).padStart(2, "0")}:${secText}`
     : `${minutes}:${secText}`;
 }
+
+/**
+ * 将时间字符串或时间戳格式化为日期与时间两部分。
+ * @param dateInput ISO 日期字符串、时间戳毫秒数或 Date 实例
+ * @returns 包含 date（YYYY/MM/DD）与 time（HH:mm:ss）的对象
+ */
+export function formatDateTimeParts(
+  dateInput?: string | number | Date | null,
+): { date: string; time: string } {
+  if (!dateInput) return { date: "—", time: "" };
+  try {
+    const d = new Date(dateInput);
+    if (isNaN(d.getTime())) return { date: "—", time: "" };
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    const date = `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return { date, time };
+  } catch {
+    return { date: "—", time: "" };
+  }
+}

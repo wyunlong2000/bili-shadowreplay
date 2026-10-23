@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatTimecode } from "../lib/time-format";
+  import { formatTimecode, formatDateTimeParts } from "../lib/time-format";
   import { formatSize } from "../lib/size-format";
   import { liveRoomUrl, platformLabel } from "../lib/platform";
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
@@ -662,7 +662,7 @@
         </div>
       {:else}
         <div class="overflow-x-auto custom-scrollbar-light">
-          <table class="w-full table-fixed whitespace-nowrap">
+          <table class="w-full">
             <thead>
               <tr class="border-b border-line bg-control/60">
                 <th class="w-12 px-4 py-2.5 text-left">
@@ -679,7 +679,7 @@
                   >直播间</th
                 >
                 <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-64"
+                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted min-w-[260px]"
                   >素材</th
                 >
                 <th
@@ -687,7 +687,7 @@
                   >备注</th
                 >
                 <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-20"
+                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-24"
                   >时长</th
                 >
                 <th
@@ -695,7 +695,7 @@
                   >大小</th
                 >
                 <th
-                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-28"
+                  class="px-4 py-2.5 text-left text-[11px] font-medium text-fg-muted w-36"
                   >创建时间</th
                 >
                 <th
@@ -706,6 +706,7 @@
             </thead>
             <tbody class="divide-y divide-line">
               {#each filteredVideos as video (video.id)}
+                {@const dt = formatDateTimeParts(video.created_at)}
                 <tr
                   class="group transition-colors hover:bg-control-hover/50 {selectedVideos.has(
                     video.id
@@ -772,10 +773,10 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-64 overflow-hidden">
+                  <td class="px-4 py-2.5 min-w-[260px]">
                     <div class="flex items-center space-x-3 w-full min-w-0">
                       <div
-                        class="flex h-8 w-12 flex-shrink-0 items-center justify-center overflow-hidden rounded-[6px] border border-line bg-sunken"
+                        class="flex h-10 w-16 flex-shrink-0 items-center justify-center overflow-hidden rounded-[6px] border border-line bg-sunken"
                       >
                         {#if video.cover && video.cover.trim() !== ""}
                           <img
@@ -803,7 +804,7 @@
                       </div>
                       <div class="min-w-0 flex-1">
                         <p
-                          class="w-full truncate text-[12px] font-medium text-fg"
+                          class="line-clamp-2 break-all text-[12px] font-medium text-fg leading-snug"
                           title={video.title || video.file}
                         >
                           {video.title || video.file}
@@ -827,7 +828,7 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-20">
+                  <td class="px-4 py-2.5 w-24">
                     <div class="flex items-center space-x-2">
                       <Clock class="table-icon text-fg-faint" />
                       <span class="text-[12px] tabular-nums text-fg-secondary"
@@ -845,12 +846,13 @@
                     </div>
                   </td>
 
-                  <td class="px-4 py-2.5 w-28">
+                  <td class="px-4 py-2.5 w-36">
                     <div class="flex items-center space-x-2">
-                      <Calendar class="table-icon text-fg-faint" />
-                      <span class="truncate text-[12px] text-fg-secondary"
-                        >{formatDate(video.created_at)}</span
-                      >
+                      <Calendar class="table-icon text-fg-faint shrink-0" />
+                      <div class="flex flex-col min-w-0">
+                        <span class="text-[12px] tabular-nums text-fg leading-tight">{dt.date}</span>
+                        <span class="text-[11px] tabular-nums text-fg-muted leading-tight">{dt.time}</span>
+                      </div>
                     </div>
                   </td>
 

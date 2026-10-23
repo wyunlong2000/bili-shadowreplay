@@ -39,3 +39,23 @@ test("precision is configurable and negatives clamp to zero", async () => {
   assert.equal(formatTimecode(9.876, 2), "0:09.88");
   assert.equal(formatTimecode(-5), "0:00.0");
 });
+
+test("formatDateTimeParts splits date and time correctly and handles fallbacks", async () => {
+  const { formatDateTimeParts } = await loadModule();
+  const empty1 = formatDateTimeParts(null);
+  assert.equal(empty1.date, "—");
+  assert.equal(empty1.time, "");
+
+  const empty2 = formatDateTimeParts(undefined);
+  assert.equal(empty2.date, "—");
+  assert.equal(empty2.time, "");
+
+  const invalid = formatDateTimeParts("invalid-date");
+  assert.equal(invalid.date, "—");
+  assert.equal(invalid.time, "");
+
+  const fixed = new Date(2026, 9, 23, 0, 15, 30); // 2026-10-23 00:15:30
+  const result = formatDateTimeParts(fixed);
+  assert.equal(result.date, "2026/10/23");
+  assert.equal(result.time, "00:15:30");
+});
