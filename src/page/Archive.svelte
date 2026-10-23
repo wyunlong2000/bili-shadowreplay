@@ -772,7 +772,7 @@
                 <th class="w-36 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">直播间</th>
                 <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">标题</th>
                 <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">时长</th>
-                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
+                <th class="w-28 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
                 <th class="w-24 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">码率</th>
                 <th class="w-48 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
@@ -868,9 +868,9 @@
                   </td>
 
                   <td class="px-3 py-2.5 align-top">
-                    <div class="flex items-center gap-1.5">
+                    <div class="flex items-center gap-1.5 whitespace-nowrap">
                       <HardDrive class="h-3.5 w-3.5 text-fg-faint shrink-0" />
-                      <span class="text-[12px] tabular-nums text-fg"
+                      <span class="text-[12px] tabular-nums text-fg whitespace-nowrap"
                         >{formatSize(archive.size)}</span
                       >
                     </div>

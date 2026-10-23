@@ -9,7 +9,12 @@
     getAutomationCandidates,
     cancelAutomationRun,
   } from "../../automation";
-  import type { AutomationCandidateRow, AutomationRunRow } from "../../interface";
+  import type {
+    AutomationCandidateRow,
+    AutomationRunRow,
+    RecorderList,
+  } from "../../interface";
+  import type { RecordItem } from "../../db";
   import { invoke } from "../../invoker";
   import { createStateRefresh, watchStateChanges } from "../../state-refresh";
   import { usePageVisibility } from "../../page-visibility";
@@ -37,6 +42,7 @@
   let selectedRunId = $state<string | null>(null);
   let candidates = $state<AutomationCandidateRow[]>([]);
   let selectedCandidateId = $state<string | null>(null);
+  let recordMap = $state<Map<string, { title: string; userName?: string }>>(new Map());
 
   let loadingRuns = $state(false);
   let loadingCandidates = $state(false);
@@ -47,14 +53,133 @@
   let selectedCandidate = $derived(
     candidates.find((c) => c.id === selectedCandidateId) || null
   );
+  let selectedRunRecord = $derived(
+    selectedRun?.live_id ? recordMap.get(selectedRun.live_id) : undefined
+  );
 
   /**
-   * 刷新运行记录列表
+   * 将平台英文标识转换为中文显示
+   * @param p 平台英文标识（如 bilibili, douyin 等）
+   * @returns 平台中文名称
+   */
+  function platformLabel(p: string): string {
+    const map: Record<string, string> = {
+      bilibili: "B站",
+      douyin: "抖音",
+      douyu: "斗鱼",
+      huya: "虎牙",
+      kuaishou: "快手",
+      tiktok: "TikTok",
+      twitch: "Twitch",
+      youtube: "YouTube",
+    };
+    return map[p?.toLowerCase()] || p || "";
+  }
+
+  /**
+   * 将自动化运行状态转换为中文显示
+   * @param status 运行状态
+   * @returns 中文状态文本
+   */
+  function statusLabel(status: string): string {
+    switch (status) {
+      case "pending":
+        return "排队中";
+      case "processing":
+        return "分析中";
+      case "success":
+        return "已完成";
+      case "partial_success":
+        return "部分完成";
+      case "failed":
+        return "失败";
+      case "cancelled":
+        return "已取消";
+      default:
+        return status;
+    }
+  }
+
+  /**
+   * 格式化录播场次下拉框的选项文案（包含录播标题）
+   * @param r 自动化运行记录
+   * @returns 选项格式化文案
+   */
+  function formatRunOption(r: AutomationRunRow): string {
+    const meta = recordMap.get(r.live_id);
+    const title = meta?.title?.trim();
+    const platform = platformLabel(r.platform);
+    const status = statusLabel(r.status);
+    const idDisplay = r.live_id || r.id.slice(0, 8);
+
+    if (title) {
+      return `【${title}】 ${platform} · ${idDisplay} (${status})`;
+    }
+    return `${platform} · ${r.room_id} · ${idDisplay} (${status})`;
+  }
+
+  /**
+   * 刷新运行记录列表以及关联的历史录播标题与主播信息
    */
   async function refreshRuns() {
     loadingRuns = true;
     try {
-      const list = await getAutomationRuns(undefined, undefined, 30);
+      const [list, recentRecords, recorderList] = await Promise.all([
+        getAutomationRuns(undefined, undefined, 30),
+        invoke<RecordItem[]>("get_recent_record", {
+          roomId: "",
+          offset: 0,
+          limit: 100,
+        }).catch(() => [] as RecordItem[]),
+        invoke<RecorderList>("get_recorder_list").catch(() => null),
+      ]);
+
+      const map = new Map<string, { title: string; userName?: string }>();
+      const userMap = new Map<string, string>();
+      if (recorderList?.recorders) {
+        for (const rec of recorderList.recorders) {
+          userMap.set(
+            rec.room_info.room_id,
+            rec.user_info?.user_name || rec.room_info?.room_title || rec.room_info.room_id
+          );
+        }
+      }
+
+      if (recentRecords) {
+        for (const item of recentRecords) {
+          if (item.live_id) {
+            map.set(item.live_id, {
+              title: item.title,
+              userName: userMap.get(item.room_id),
+            });
+          }
+        }
+      }
+
+      // 若有运行记录的 live_id 未在 recentRecords 中命中，按需拉取对应归档信息
+      const missingRuns = list.filter((r) => r.live_id && !map.has(r.live_id));
+      if (missingRuns.length > 0) {
+        await Promise.allSettled(
+          missingRuns.map(async (r) => {
+            try {
+              const archive = await invoke<RecordItem>("get_archive", {
+                roomId: r.room_id,
+                liveId: r.live_id,
+              });
+              if (archive && archive.title) {
+                map.set(r.live_id, {
+                  title: archive.title,
+                  userName: userMap.get(r.room_id),
+                });
+              }
+            } catch {
+              // 忽略单个未找到的录播
+            }
+          })
+        );
+      }
+
+      recordMap = map;
       runs = list;
       if (list.length > 0) {
         if (!selectedRunId || !list.some((r) => r.id === selectedRunId)) {
@@ -152,12 +277,12 @@
         <span class="text-xs text-fg-muted">暂无已运行的分析记录</span>
       {:else}
         <select
-          class="ui-input min-w-[260px] text-xs font-mono"
+          class="ui-input min-w-[280px] max-w-[420px] text-xs"
           bind:value={selectedRunId}
         >
           {#each runs as r}
             <option value={r.id}>
-              {r.platform} · {r.room_id} · {r.live_id || r.id.slice(0, 8)} ({r.status})
+              {formatRunOption(r)}
             </option>
           {/each}
         </select>
@@ -187,31 +312,45 @@
   <!-- 任务运行状态进度卡片 (如果正在运行或失败) -->
   {#if selectedRun}
     <div class="ui-card p-3 bg-control/40 border-line flex flex-wrap items-center justify-between gap-3 text-xs">
-      <div class="flex items-center gap-3">
-        <span class="font-medium text-fg">场次状态:</span>
-        {#if selectedRun.status === "processing"}
-          <span class="flex items-center gap-1 text-blue-500">
-            <Loader2 class="h-3.5 w-3.5 animate-spin" />
-            正在分析 ({selectedRun.stage} 阶段)
-          </span>
-          {#if selectedRun.total_windows > 0}
-            <span class="text-fg-muted">
-              滑窗进度: {selectedRun.completed_windows} / {selectedRun.total_windows}
+      <div class="flex items-center gap-3 flex-wrap">
+        {#if selectedRunRecord?.title}
+          <div class="flex items-center gap-1.5 font-medium text-fg">
+            <span class="text-fg-muted">录播标题:</span>
+            <span class="font-semibold text-fg truncate max-w-sm" title={selectedRunRecord.title}>
+              {selectedRunRecord.title}
             </span>
-          {/if}
-        {:else if selectedRun.status === "success" || selectedRun.status === "partial_success"}
-          <span class="text-green-600 dark:text-green-400 font-medium">
-            已完成 · 识别出 {candidates.length} 个高光片段
-          </span>
-        {:else if selectedRun.status === "failed"}
-          <span class="text-red-500 font-medium">
-            分析失败: {selectedRun.error_message || selectedRun.error_code || "未知错误"}
-          </span>
-        {:else if selectedRun.status === "cancelled"}
-          <span class="text-fg-muted">已取消</span>
-        {:else}
-          <span class="text-amber-500">{selectedRun.status}</span>
+            {#if selectedRunRecord.userName}
+              <span class="text-xs text-fg-muted">({selectedRunRecord.userName})</span>
+            {/if}
+          </div>
+          <span class="text-line">|</span>
         {/if}
+        <div class="flex items-center gap-1.5">
+          <span class="font-medium text-fg">场次状态:</span>
+          {#if selectedRun.status === "processing"}
+            <span class="flex items-center gap-1 text-blue-500">
+              <Loader2 class="h-3.5 w-3.5 animate-spin" />
+              正在分析 ({selectedRun.stage} 阶段)
+            </span>
+            {#if selectedRun.total_windows > 0}
+              <span class="text-fg-muted">
+                滑窗进度: {selectedRun.completed_windows} / {selectedRun.total_windows}
+              </span>
+            {/if}
+          {:else if selectedRun.status === "success" || selectedRun.status === "partial_success"}
+            <span class="text-green-600 dark:text-green-400 font-medium">
+              已完成 · 识别出 {candidates.length} 个高光片段
+            </span>
+          {:else if selectedRun.status === "failed"}
+            <span class="text-red-500 font-medium">
+              分析失败: {selectedRun.error_message || selectedRun.error_code || "未知错误"}
+            </span>
+          {:else if selectedRun.status === "cancelled"}
+            <span class="text-fg-muted">已取消</span>
+          {:else}
+            <span class="text-amber-500">{selectedRun.status}</span>
+          {/if}
+        </div>
       </div>
 
       {#if selectedRun.status === "processing" || selectedRun.status === "pending"}

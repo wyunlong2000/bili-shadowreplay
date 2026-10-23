@@ -678,7 +678,7 @@
                 <th class="px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">素材</th>
                 <th class="w-16 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">备注</th>
                 <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">时长</th>
-                <th class="w-20 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
+                <th class="w-28 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">大小</th>
                 <th class="w-32 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">创建时间</th>
                 <th class="w-48 px-3 py-2.5 text-left text-[11px] font-medium text-fg-muted">操作</th>
               </tr>
@@ -817,9 +817,9 @@
                   </td>
 
                   <td class="px-3 py-2.5 align-top">
-                    <div class="flex items-center space-x-1.5">
+                    <div class="flex items-center space-x-1.5 whitespace-nowrap">
                       <HardDrive class="table-icon text-fg-faint shrink-0" />
-                      <span class="text-[12px] tabular-nums text-fg-secondary"
+                      <span class="text-[12px] tabular-nums text-fg-secondary whitespace-nowrap"
                         >{formatSize(video.size)}</span
                       >
                     </div>
