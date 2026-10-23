@@ -75,6 +75,12 @@ pub struct ProjectView {
     /// False when the project is one untouched material, which is exported
     /// and uploaded as is.
     pub needs_render: bool,
+    /// 源录播中的开始时间（秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_start: Option<f64>,
+    /// 源录播中的结束时间（秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_end: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,11 +234,28 @@ fn project_view(project: ProjectRow, materials: &HashMap<i64, VideoRow>) -> Proj
     } else {
         project.cover.clone()
     };
+    let first_clip = timeline.clips.first();
+    let (source_start, source_end) = first_clip
+        .and_then(|clip| {
+            let material = materials.get(&clip.material_id)?;
+            if material.source.is_empty() {
+                return None;
+            }
+            let source =
+                serde_json::from_str::<crate::database::video::MaterialSource>(&material.source)
+                    .ok()?;
+            let range = source.ranges.first()?;
+            Some((range.start + clip.start, range.start + clip.end))
+        })
+        .map(|(s, e)| (Some(s), Some(e)))
+        .unwrap_or((None, None));
     ProjectView {
         needs_render: plain_material(&timeline, materials).is_none(),
         duration: timeline.duration(),
         clip_count: timeline.clips.len(),
         display_cover,
+        source_start,
+        source_end,
         project,
     }
 }
@@ -330,12 +353,16 @@ struct NewProject<'a> {
 async fn create_project_inner(state: &State, new: NewProject<'_>) -> Result<ProjectView, String> {
     let first = new.materials.first();
     let title = if !new.title.trim().is_empty() {
-        new.title.trim().to_string()
+        strip_machine_tags(new.title.trim())
     } else if let Some(first) = first {
         material_title(first)
     } else {
         "未命名切片".to_string()
     };
+    let note = first
+        .map(|m| m.note.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_default();
     let room_id = if new.room_id.is_empty() {
         first.map(|m| m.room_id.clone()).unwrap_or_default()
     } else {
@@ -364,7 +391,7 @@ async fn create_project_inner(state: &State, new: NewProject<'_>) -> Result<Proj
             room_id,
             platform,
             title,
-            note: String::new(),
+            note,
             cover: String::new(),
             timeline: timeline.to_json(),
             profile: String::new(),
@@ -976,9 +1003,31 @@ pub(crate) async fn set_project_danmu(state: &State, id: i64, danmu: bool) -> Re
     .await
 }
 
-/// A material's title, or its file name without the extension.
+/// 剥离文本前导连续的方括号机器标签（如 `[full][douyin][...]标题` -> `标题`）
+/// 若剥离后为空则返回原字符串
+pub(crate) fn strip_machine_tags(s: &str) -> String {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') {
+        return trimmed.to_string();
+    }
+    let mut rest = trimmed;
+    while rest.starts_with('[') {
+        if let Some(close_idx) = rest.find(']') {
+            rest = rest[close_idx + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    if rest.trim().is_empty() {
+        trimmed.to_string()
+    } else {
+        rest.trim().to_string()
+    }
+}
+
+/// A material's title, or its file name without the extension, with leading machine tags stripped.
 pub(crate) fn material_title(material: &VideoRow) -> String {
-    if material.title.is_empty() {
+    let raw = if material.title.trim().is_empty() {
         Path::new(&material.file)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -986,7 +1035,8 @@ pub(crate) fn material_title(material: &VideoRow) -> String {
             .to_string()
     } else {
         material.title.clone()
-    }
+    };
+    strip_machine_tags(&raw)
 }
 
 const UPLOAD_RENDER_PREFIX: &str = "render_";
@@ -2156,5 +2206,18 @@ mod tests {
         .unwrap();
         create_legacy_projects(db.clone(), output.path().to_path_buf()).await;
         assert_eq!(db.get_projects().await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_strip_machine_tags() {
+        assert_eq!(
+            strip_machine_tags(
+                "[full][douyin][MS4wLjABAAAA][76983278][20261023001015]这次，我要拿回属于我的一切！"
+            ),
+            "这次，我要拿回属于我的一切！"
+        );
+        assert_eq!(strip_machine_tags("[clip] 精华片段"), "精华片段");
+        assert_eq!(strip_machine_tags("[full][douyin]"), "[full][douyin]");
+        assert_eq!(strip_machine_tags("普通的标题"), "普通的标题");
     }
 }

@@ -3,7 +3,7 @@
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
   import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, get_static_url } from "../lib/invoker";
-  import type { ProjectItem } from "../lib/interface";
+  import type { ProjectItem, RecorderList } from "../lib/interface";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
   import AutomationWorkspace from "../lib/components/automation/AutomationWorkspace.svelte";
   import { onMount } from "svelte";
@@ -33,9 +33,11 @@
   let sortBy: "updated_at" | "created_at" | "title" | "duration" = $state("updated_at");
   let projectToDelete: ProjectRow | null = $state(null);
   let projectToNote: ProjectRow | null = $state(null);
+  let editingTitle = $state("");
   let editingNote = $state("");
   let creating = $state(false);
   let activeTab: "projects" | "automation" = $state("projects");
+  let recorders = $state<Map<string, { userName: string; platform: string }>>(new Map());
 
   let roomIds = $derived([...new Set(projects.map((project) => project.room_id))].filter(Boolean).sort());
   let filtered = $derived.by(() => {
@@ -60,9 +62,61 @@
       });
   });
 
+  /**
+   * 清洗切片标题，剥离前导连续的机器方括号标签（如 [full][douyin][...]）
+   */
+  function cleanProjectTitle(title: string): string {
+    if (!title) return "";
+    const cleaned = title.replace(/^(?:\[[^\]]*\])+\s*/g, "").trim();
+    return cleaned || title;
+  }
+
+  /**
+   * 将平台英文标识转换为中文显示
+   */
+  function platformLabel(p?: string): string {
+    if (!p) return "";
+    const map: Record<string, string> = {
+      bilibili: "B站",
+      douyin: "抖音",
+      douyu: "斗鱼",
+      huya: "虎牙",
+      kuaishou: "快手",
+      tiktok: "TikTok",
+      twitch: "Twitch",
+      youtube: "YouTube",
+    };
+    return map[p.toLowerCase()] || p;
+  }
+
+  /**
+   * 获取下拉框展示文案
+   */
+  function formatRoomOption(roomId: string): string {
+    const info = recorders.get(roomId);
+    if (info && info.userName) {
+      const platformName = platformLabel(info.platform);
+      return platformName ? `${info.userName} (${platformName})` : info.userName;
+    }
+    return roomId.length > 20 ? `${roomId.slice(0, 16)}...` : roomId;
+  }
+
   const stateRefresh = createStateRefresh(async () => {
     try {
-      const list = await invoke<ProjectItem[]>("get_projects");
+      const [list, recorderList] = await Promise.all([
+        invoke<ProjectItem[]>("get_projects"),
+        invoke<RecorderList>("get_recorder_list").catch(() => null),
+      ]);
+      if (recorderList?.recorders) {
+        const map = new Map<string, { userName: string; platform: string }>();
+        for (const r of recorderList.recorders) {
+          map.set(r.room_info.room_id, {
+            userName: r.user_info?.user_name || r.room_info?.room_title || r.room_info.room_id,
+            platform: r.platform || "",
+          });
+        }
+        recorders = map;
+      }
       projects = await Promise.all(
         list.map(async (project) => ({
           ...project,
@@ -145,20 +199,30 @@
     }
   }
 
-  function openNoteDialog(project: ProjectRow) {
+  /**
+   * 打开编辑切片信息对话框
+   */
+  function openInfoDialog(project: ProjectRow) {
     projectToNote = project;
+    editingTitle = cleanProjectTitle(project.title);
     editingNote = project.note;
   }
 
-  async function saveNote() {
+  /**
+   * 保存切片信息（标题与备注）
+   */
+  async function saveProjectInfo() {
     if (!projectToNote) return;
     try {
-      // Only the note: the editor may have just renamed the project.
-      await invoke("update_project_info", { id: projectToNote.id, note: editingNote.trim() });
+      await invoke("update_project_info", {
+        id: projectToNote.id,
+        title: editingTitle.trim() || "未命名切片",
+        note: editingNote.trim(),
+      });
       projectToNote = null;
       await stateRefresh.run();
     } catch (error) {
-      alert("保存备注失败：" + error);
+      alert("保存切片信息失败：" + error);
     }
   }
 </script>
@@ -211,10 +275,10 @@
     <div class="ui-card px-3 py-2.5">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
-          <select bind:value={selectedRoomId} class="ui-input min-w-[160px]">
+          <select bind:value={selectedRoomId} class="ui-input min-w-[160px] max-w-[240px]">
             <option value={null}>所有直播间</option>
             {#each roomIds as roomId}
-              <option value={roomId}>{roomId}</option>
+              <option value={roomId}>{formatRoomOption(roomId)}</option>
             {/each}
           </select>
           <div class="relative">
@@ -272,6 +336,10 @@
             <tbody class="divide-y divide-line">
               {#each filtered as project (project.id)}
                 {@const dt = formatDateTimeParts(project.updated_at)}
+                {@const recInfo = recorders.get(project.room_id)}
+                {@const userName = recInfo?.userName}
+                {@const platformName = platformLabel(project.platform || recInfo?.platform)}
+                {@const fullRoomTitle = [platformName, userName, project.room_id].filter(Boolean).join(" · ")}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="px-3 py-2.5 align-top">
                     <button
@@ -288,7 +356,7 @@
                       </div>
                       <div class="min-w-0 flex-1">
                         <p class="break-all text-[12px] font-medium text-fg leading-snug" title={project.title}>
-                          {project.title || "未命名切片"}
+                          {cleanProjectTitle(project.title) || "未命名切片"}
                         </p>
                         <p class="break-all text-[11px] text-fg-muted leading-tight mt-1" title={project.note}>
                           {project.note || "无备注"}
@@ -297,15 +365,35 @@
                     </button>
                   </td>
                   <td class="px-3 py-2.5 align-top">
-                    <span class="block break-all text-[12px] text-fg-secondary leading-tight" title={project.room_id || "—"}>
-                      {project.room_id || "—"}
-                    </span>
+                    {#if userName}
+                      <div class="flex flex-col min-w-0" title={fullRoomTitle}>
+                        <span class="truncate text-[12px] font-medium text-fg leading-tight">
+                          {userName}
+                        </span>
+                        {#if platformName}
+                          <span class="text-[11px] text-fg-muted leading-tight mt-0.5">
+                            {platformName}
+                          </span>
+                        {/if}
+                      </div>
+                    {:else}
+                      <span class="block truncate text-[12px] text-fg-secondary leading-tight" title={project.room_id || "—"}>
+                        {project.room_id || "—"}
+                      </span>
+                    {/if}
                   </td>
                   <td class="px-3 py-2.5 align-top">
-                    <div class="flex items-center gap-1.5 text-[12px] text-fg-secondary">
-                      <Clock class="table-icon text-fg-faint shrink-0" />
-                      <span class="tabular-nums">{formatTimecode(project.duration, 0)}</span>
-                      <span class="text-fg-faint">· {project.clip_count} 段</span>
+                    <div class="flex flex-col min-w-0">
+                      <div class="flex items-center gap-1.5 text-[12px] text-fg-secondary">
+                        <Clock class="table-icon text-fg-faint shrink-0" />
+                        <span class="tabular-nums">{formatTimecode(project.duration, 0)}</span>
+                        <span class="text-fg-faint">· {project.clip_count} 段</span>
+                      </div>
+                      {#if project.source_start != null && project.source_end != null}
+                        <span class="text-[11px] text-fg-muted tabular-nums leading-tight mt-1">
+                          源 {formatTimecode(project.source_start, 0)} - {formatTimecode(project.source_end, 0)}
+                        </span>
+                      {/if}
                     </div>
                   </td>
                   <td class="px-3 py-2.5 align-top">
@@ -350,8 +438,8 @@
                       </button>
                       <button
                         class="action-button hover:bg-success-soft"
-                        title="编辑备注"
-                        onclick={() => openNoteDialog(project)}
+                        title="编辑切片信息"
+                        onclick={() => openInfoDialog(project)}
                       >
                         <Edit class="h-3.5 w-3.5 text-success-fg" />
                       </button>
@@ -410,30 +498,47 @@
       onclick={(event) => event.stopPropagation()}
       role="dialog"
       tabindex="-1"
-      aria-labelledby="project-note-title"
+      aria-labelledby="project-info-title"
     >
       <div class="ui-modal-header">
-        <h3 id="project-note-title" class="min-w-0 truncate">编辑切片备注</h3>
+        <h3 id="project-info-title" class="min-w-0 truncate">编辑切片信息</h3>
       </div>
-      <div class="ui-modal-body space-y-2">
-        <label for="project-note-textarea" class="ui-label block">
-          「{projectToNote.title || "未命名切片"}」的备注
-        </label>
-        <textarea
-          id="project-note-textarea"
-          bind:value={editingNote}
-          placeholder="为这个切片添加备注"
-          class="ui-input w-full resize-none"
-          rows="4"
-          onkeydown={(event) => {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void saveNote();
-          }}
-        ></textarea>
-        <div class="ui-hint">按 ⌘+Enter 快速保存</div>
+      <div class="ui-modal-body space-y-3">
+        <div class="space-y-1">
+          <label for="project-title-input" class="ui-label block text-xs font-medium text-fg">
+            切片标题
+          </label>
+          <input
+            id="project-title-input"
+            type="text"
+            bind:value={editingTitle}
+            placeholder="输入切片标题"
+            class="ui-input w-full"
+            onkeydown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void saveProjectInfo();
+            }}
+          />
+        </div>
+        <div class="space-y-1">
+          <label for="project-note-textarea" class="ui-label block text-xs font-medium text-fg">
+            切片备注
+          </label>
+          <textarea
+            id="project-note-textarea"
+            bind:value={editingNote}
+            placeholder="为这个切片添加备注"
+            class="ui-input w-full resize-none"
+            rows="3"
+            onkeydown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void saveProjectInfo();
+            }}
+          ></textarea>
+        </div>
+        <div class="ui-hint">按 ⌘+Enter 或 Ctrl+Enter 快速保存</div>
       </div>
       <div class="ui-modal-footer">
         <button class="ui-btn w-20" onclick={() => (projectToNote = null)}>取消</button>
-        <button class="ui-btn ui-btn-primary w-20" onclick={saveNote}>保存</button>
+        <button class="ui-btn ui-btn-primary w-20" onclick={saveProjectInfo}>保存</button>
       </div>
     </div>
   </div>

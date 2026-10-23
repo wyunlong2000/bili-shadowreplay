@@ -275,6 +275,10 @@ export interface ProjectItem {
   display_cover: string;
   /** False when the project is one untouched material, exported and uploaded as is. */
   needs_render: boolean;
+  /** 源录播中的开始时间（秒） */
+  source_start?: number | null;
+  /** 源录播中的结束时间（秒） */
+  source_end?: number | null;
 }
 
 export interface GeneratedMaterials {

@@ -88,7 +88,7 @@
 
   // 所有数据缓存
   let allArchives: ArchiveRecord[] = [];
-  let allRooms: RecorderInfo[] = [];
+  let allRooms = $state<RecorderInfo[]>([]);
 
   /**
    * 获取录播记录的创建时间戳（毫秒），复用预解析数值避免排序时重复构造 Date。
@@ -781,6 +781,9 @@
               {#each filteredArchives as archive (getArchiveKey(archive))}
                 {@const roomUrl = liveRoomUrl(archive.platform, archive.room_id)}
                 {@const dt = formatDateTimeParts(archive.created_at)}
+                {@const roomObj = allRooms.find((r) => r.room_info.room_id === archive.room_id)}
+                {@const displayName = roomObj?.user_info?.user_name || roomObj?.room_info?.room_title || archive.room_id}
+                {@const fullRoomTitle = `${platformLabel(archive.platform)} · ${displayName} (${archive.room_id})`}
                 <tr class="group transition-colors hover:bg-control-hover/50">
                   <td class="w-10 px-3 py-2.5 align-top">
                     <input
@@ -829,13 +832,13 @@
                           target="_blank"
                           rel="noopener noreferrer"
                           class="break-all text-[12px] text-accent-fg underline-offset-2 hover:underline leading-tight min-w-0"
-                          title={`打开 ${platformLabel(archive.platform)} 直播间: ${archive.room_id}`}
+                          title={fullRoomTitle}
                         >
-                          {archive.room_id}
+                          {displayName}
                         </a>
                       {:else}
-                        <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={archive.room_id}
-                          >{archive.room_id}</span
+                        <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={fullRoomTitle}
+                          >{displayName}</span
                         >
                       {/if}
                     </div>

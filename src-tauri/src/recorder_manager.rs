@@ -1992,7 +1992,7 @@ impl RecorderManager {
                 length: duration as i64,
                 size,
                 bvid: String::new(),
-                title: String::new(),
+                title: title.to_string(),
                 desc: String::new(),
                 tags: String::new(),
                 area: 0,

@@ -5,7 +5,7 @@
   import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
   import { usePageVisibility } from "../lib/page-visibility";
   import { invoke, TAURI_ENV, get_static_url } from "../lib/invoker";
-  import type { VideoItem } from "../lib/interface";
+  import type { VideoItem, RecorderList } from "../lib/interface";
   import ImportVideoDialog from "../lib/components/ImportVideoDialog.svelte";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
   import { onMount, onDestroy, tick } from "svelte";
@@ -49,6 +49,19 @@
   let sortOrder = $state("desc");
   let selectedRoomId = $state(null);
   let roomIds: string[] = $state([]);
+  let recorders = $state<Map<string, { userName: string; platform: string }>>(new Map());
+
+  /**
+   * 获取下拉框展示文案
+   */
+  function formatRoomOption(roomId: string): string {
+    const info = recorders.get(roomId);
+    if (info && info.userName) {
+      const platformName = platformLabel(info.platform);
+      return platformName ? `${info.userName} (${platformName})` : info.userName;
+    }
+    return roomId.length > 20 ? `${roomId.slice(0, 16)}...` : roomId;
+  }
 
   let selectedVideos = new SvelteSet<number>();
   let showDeleteConfirm = $state(false);
@@ -199,10 +212,24 @@
 
   async function fetchVideoList() {
     try {
-      // 获取所有视频
+      // 获取所有视频与主播列表
       const allVideos: VideoItem[] = [];
       const roomIdsSet = new Set<string>();
-      const tempVideos = await invoke<VideoItem[]>("get_all_videos");
+      const [tempVideos, recorderList] = await Promise.all([
+        invoke<VideoItem[]>("get_all_videos"),
+        invoke<RecorderList>("get_recorder_list").catch(() => null),
+      ]);
+
+      if (recorderList?.recorders) {
+        const map = new Map<string, { userName: string; platform: string }>();
+        for (const r of recorderList.recorders) {
+          map.set(r.room_info.room_id, {
+            userName: r.user_info?.user_name || r.room_info?.room_title || r.room_info.room_id,
+            platform: r.platform || "",
+          });
+        }
+        recorders = map;
+      }
 
       for (const video of tempVideos) {
         video.cover = await get_static_url("output", video.cover);
@@ -500,11 +527,11 @@
           <select
             bind:value={selectedRoomId}
             onchange={applyFilters}
-            class="ui-input min-w-[160px]"
+            class="ui-input min-w-[160px] max-w-[240px]"
           >
             <option value={null}>所有直播间</option>
             {#each roomIds as roomId}
-              <option value={roomId}>{roomId}</option>
+              <option value={roomId}>{formatRoomOption(roomId)}</option>
             {/each}
           </select>
         </div>
@@ -686,6 +713,9 @@
             <tbody class="divide-y divide-line">
               {#each filteredVideos as video (video.id)}
                 {@const dt = formatDateTimeParts(video.created_at)}
+                {@const recInfo = recorders.get(video.room_id)}
+                {@const displayName = recInfo?.userName || video.room_id}
+                {@const fullRoomTitle = `${platformLabel(video.platform)} · ${displayName} (${video.room_id})`}
                 <tr
                   class="group transition-colors hover:bg-control-hover/50 {selectedVideos.has(
                     video.id
@@ -741,12 +771,12 @@
                             target="_blank"
                             rel="noopener noreferrer"
                             class="break-all text-[12px] text-accent-fg hover:underline leading-tight min-w-0"
-                            title={`打开 ${platformLabel(video.platform)} 直播间: ${video.room_id}`}
+                            title={fullRoomTitle}
                           >
-                            {video.room_id}
+                            {displayName}
                           </a>
                         {:else}
-                          <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={video.room_id}>{video.room_id}</span>
+                          <span class="break-all text-[12px] text-fg leading-tight min-w-0" title={fullRoomTitle}>{displayName}</span>
                         {/if}
                       {/if}
                     </div>
